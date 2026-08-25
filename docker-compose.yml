@@ -14,7 +14,9 @@ services:
     restart: unless-stopped
 
     env_file:
-      - .env
+      # Optional: a server can pass real env vars instead of shipping a .env
+      - path: .env
+        required: false
 
     environment:
       APP_NAME: ${APP_NAME:-ai-agents}
