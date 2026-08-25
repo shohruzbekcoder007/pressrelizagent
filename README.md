@@ -30,6 +30,28 @@ together with `OPENAI_API_KEY` / `OPENAI_BASE_URL` is all it needs — no
 interactive `hermes login` or `hermes setup` step, so deployment stays a
 single command.
 
+## Hermes toolsets
+
+`HERMES_ENABLED_TOOLSETS` selects which of Hermes' 59 toolsets the host agent
+gets. The default enables persistence and self-improvement, and nothing that
+reaches outside the container:
+
+| Toolset | Tools | What it gives the agent |
+|---|---|---|
+| `memory` | `memory` | durable facts, re-injected into every later turn |
+| `session_search` | `session_search` | recall and summarize past conversations |
+| `skills` | `skill_manage`, `skill_view`, `skills_list` | write and revise its own skill documents |
+| `todo` | `todo` | plan multi-step work |
+
+Everything Hermes learns lives under `HERMES_HOME` — `memories/`, `skills/`,
+`sessions/`, `state.db`, `SOUL.md` — kept in the `ai-agents-hermes-home` named
+volume so a redeploy does not wipe it. `config/hermes_config.yaml` is copied in
+only when the volume has no `config.yaml` yet; delete the volume to re-seed it.
+
+Toolsets such as `terminal`, `code_execution`, `file` and `browser` let the
+agent act inside the container. Set `API_BEARER_TOKEN` before enabling any of
+them — `/v1/chat` is unauthenticated while it is unset.
+
 ## Layout
 
 ```
@@ -89,7 +111,7 @@ All via environment (`.env`, see `.env.example`).
 | `OPENAI_BASE_URL` | OpenAI | point at any compatible gateway |
 | `HERMES_INFERENCE_PROVIDER` | `openai` | provider Hermes resolves credentials for |
 | `HERMES_SYSTEM_PROMPT_PATH` | `prompts/hermes_coordinator.md` | host prompt |
-| `HERMES_ENABLED_TOOLSETS` | *(empty)* | comma-separated Hermes toolsets |
+| `HERMES_ENABLED_TOOLSETS` | `memory,session_search,skills,todo` | comma-separated Hermes toolsets |
 | `HERMES_MAX_ITERATIONS` | `12` | tool-loop cap |
 | `HERMES_SESSION_HISTORY_LIMIT` | `6` | turns kept per session |
 | `HERMES_SKIP_MEMORY` | `false` | `true` = stateless |
