@@ -26,10 +26,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /build
 
-# Hermes framework (optional at runtime — hermes_lite fallback if import fails)
+# Hermes framework. Its build backend refuses pip wheel builds by design, so the
+# source tree is used directly via PYTHONPATH instead of being installed.
 RUN pip install --upgrade pip setuptools wheel \
-    && git clone --depth 1 --branch "${HERMES_REF}" "${HERMES_REPO}" /opt/hermes-agent \
-    && (pip install /opt/hermes-agent || echo "WARNING: hermes-agent pip failed — hermes_lite fallback")
+    && git clone --depth 1 --branch "${HERMES_REF}" "${HERMES_REPO}" /opt/hermes-agent
 
 COPY requirements.txt pyproject.toml README.md ./
 COPY agents ./agents
@@ -37,6 +37,11 @@ COPY app ./app
 
 RUN pip install -r requirements.txt \
     && pip install .
+
+# Hermes is a hard requirement: fail the build rather than ship an image that
+# silently falls back to hermes_lite.
+ENV PYTHONPATH=/opt/hermes-agent
+RUN python -c "import run_agent, hermes_cli.plugins; print('hermes-agent importable')"
 
 # -----------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
@@ -51,6 +56,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     APP_HOME=/app \
     HERMES_HOME=/home/appuser/.hermes \
     HERMES_ENABLE_PROJECT_PLUGINS=true \
+    PYTHONPATH=/opt/hermes-agent \
+    HERMES_INFERENCE_PROVIDER=openai \
     HERMES_ENABLED_TOOLSETS= \
     HERMES_SYSTEM_PROMPT_PATH=/app/prompts/hermes_coordinator.md \
     LOG_DIR=/app/logs \

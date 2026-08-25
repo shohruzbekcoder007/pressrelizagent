@@ -12,12 +12,23 @@ Gateway (Open WebUI, …) → POST /v1/chat
         └─ tools from agents/hermes_host.py::_host_langchain_tools()
 ```
 
+The real Hermes framework is a hard requirement. Its build backend refuses pip
+wheel builds by design, so the image clones the source to `/opt/hermes-agent`
+and puts it on `PYTHONPATH` rather than installing it. The build then verifies
+the import and **fails** if it is not usable — an image never ships silently
+without Hermes.
+
 Two backends, chosen automatically at startup:
 
 | Backend | When | What |
 |---|---|---|
-| `hermes` | the `hermes-agent` package imports | real Hermes `AIAgent` |
-| `hermes_lite` | it doesn't | LangGraph `create_react_agent` with the same design |
+| `hermes` | normal operation | real Hermes `AIAgent` — plugins, toolsets, its own conversation loop |
+| `hermes_lite` | safety net if the above cannot start | LangGraph `create_react_agent` with the same design |
+
+Hermes resolves its own provider credentials. `HERMES_INFERENCE_PROVIDER`
+together with `OPENAI_API_KEY` / `OPENAI_BASE_URL` is all it needs — no
+interactive `hermes login` or `hermes setup` step, so deployment stays a
+single command.
 
 ## Layout
 
@@ -76,6 +87,7 @@ All via environment (`.env`, see `.env.example`).
 | `OPENAI_API_KEY` | — | required; host is not ready without it |
 | `LLM_MODEL` | `gpt-4.1` | also `HERMES_MODEL`, `OPENAI_MODEL` |
 | `OPENAI_BASE_URL` | OpenAI | point at any compatible gateway |
+| `HERMES_INFERENCE_PROVIDER` | `openai` | provider Hermes resolves credentials for |
 | `HERMES_SYSTEM_PROMPT_PATH` | `prompts/hermes_coordinator.md` | host prompt |
 | `HERMES_ENABLED_TOOLSETS` | *(empty)* | comma-separated Hermes toolsets |
 | `HERMES_MAX_ITERATIONS` | `12` | tool-loop cap |

@@ -352,14 +352,21 @@ class HermesHostService:
             # older signature
             result = agent.run_conversation(user_message=message)
 
+        failed = False
+        err: str | None = None
         if isinstance(result, dict):
             final = result.get("final_response") or result.get("response")
             messages = result.get("messages")
+            # Hermes reports failures in-band: `error` carries the summary and
+            # `final_response` repeats it as prose. Without this check an auth
+            # or billing failure reaches callers as a successful answer.
+            err = result.get("error") or None
+            failed = bool(result.get("failed")) or bool(err)
         else:
             final = str(result)
             messages = None
 
-        if messages is not None and not self.skip_memory:
+        if messages is not None and not self.skip_memory and not failed:
             trimmed = list(messages)
             limit = max(4, self.session_limit * 2)
             if len(trimmed) > limit:
@@ -367,10 +374,24 @@ class HermesHostService:
             with _lock:
                 self._sessions[sid] = trimmed
 
+        if failed:
+            return {
+                "success": False,
+                "response": None,
+                "error": err or "Hermes conversation failed",
+                "error_code": str(result.get("failure_reason") or "agent_error"),
+                "error_detail": str(final)[:500] if final else None,
+                "retryable": bool(result.get("retryable")),
+                "session_id": sid,
+                "backend": "hermes",
+                "agents_used": ["hermes_host"],
+                "mode": "hermes_tool_host",
+            }
+
         return {
-            "success": True,
-            "response": final,
-            "error": None,
+            "success": bool((final or "").strip()),
+            "response": final or None,
+            "error": None if (final or "").strip() else "Empty host response",
             "session_id": sid,
             "backend": "hermes",
             "agents_used": ["hermes_host"],
