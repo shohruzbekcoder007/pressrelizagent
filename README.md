@@ -25,10 +25,64 @@ Two backends, chosen automatically at startup:
 | `hermes` | normal operation | real Hermes `AIAgent` — plugins, toolsets, its own conversation loop |
 | `hermes_lite` | safety net if the above cannot start | LangGraph `create_react_agent` with the same design |
 
-Hermes resolves its own provider credentials. `HERMES_INFERENCE_PROVIDER`
-together with `OPENAI_API_KEY` / `OPENAI_BASE_URL` is all it needs — no
+Hermes resolves its own provider credentials from the environment — no
 interactive `hermes login` or `hermes setup` step, so deployment stays a
-single command.
+single command. See **LLM provider** below for which variables it reads.
+
+## LLM provider
+
+`LLM_PROVIDER` is the only switch. It picks one block of `.env`; the other
+block sits there untouched, so an OpenAI key and a local server can coexist
+and neither leaks into the other.
+
+```env
+LLM_PROVIDER=openai            # openai | ollama | vllm | lmstudio
+
+# 1: OpenAI
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4.1
+HERMES_TASK_MODEL=gpt-4.1-mini
+
+# 2: local OpenAI-compatible server (Ollama / vLLM / LM Studio)
+OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+OLLAMA_MODEL=qwen3.8:27b
+OLLAMA_TASK_MODEL=qwen3:8b
+```
+
+| `LLM_PROVIDER` | Key | Endpoint | Model | Key required |
+|---|---|---|---|---|
+| `openai` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | `LLM_MODEL` | yes |
+| `ollama` | `OLLAMA_API_KEY` | `OLLAMA_BASE_URL` | `OLLAMA_MODEL` | no |
+| `vllm` | `OLLAMA_API_KEY` | `OLLAMA_BASE_URL` | `OLLAMA_MODEL` | no |
+| `lmstudio` | `OLLAMA_API_KEY` | `OLLAMA_BASE_URL` | `OLLAMA_MODEL` | no |
+
+The three local providers share one env block on purpose — point
+`OLLAMA_BASE_URL` at whichever server is running. They differ only in the
+provider profile handed to Hermes, and that profile is not cosmetic: the
+`ollama` one sends `think=false`, detects `num_ctx` and lifts the `max_tokens`
+floor. Without it Ollama truncates every reply at its internal
+`num_predict=128` default.
+
+`HERMES_INFERENCE_PROVIDER` follows `LLM_PROVIDER` automatically; set it only
+to override. From Docker, the host machine's Ollama is reachable at
+`host.docker.internal` — compose maps it for Linux hosts too.
+
+The model must support tool calling, since the host agent is a tool-calling
+loop (`ollama show <model>` lists `tools` under Capabilities).
+
+### Task model
+
+A chat UI runs small jobs behind the scenes — Open WebUI generates chat
+titles, tags and follow-up suggestions by sending a prompt marked `### Task:`
+through the normal chat route. When `HERMES_TASK_MODEL` (OpenAI) or
+`OLLAMA_TASK_MODEL` (local) is set, those go to that model in a single call:
+no tools, no history, no memory writes. Everything else reaches the full
+agent. If the task model errors, the request falls through to the main agent
+rather than failing.
+
+Unset the variable, or set `HERMES_TASK_ROUTING=false`, and the main model
+answers them as before.
 
 ## Hermes toolsets
 
@@ -78,7 +132,7 @@ scripts/
 |---|---|---|
 | GET | `/health` | liveness — never touches the LLM |
 | GET | `/ready` | host readiness; `503` when not ready |
-| GET | `/v1/info` | backend, model, registered tools |
+| GET | `/v1/info` | backend, provider, model, task model, registered tools |
 | POST | `/v1/chat` | chat; `{"message": "...", "session_id": "...", "reset_session": false}` |
 | GET | `/docs` | OpenAPI UI |
 
@@ -106,10 +160,17 @@ All via environment (`.env`, see `.env.example`).
 
 | Variable | Default | Notes |
 |---|---|---|
-| `OPENAI_API_KEY` | — | required; host is not ready without it |
+| `LLM_PROVIDER` | `openai` | `openai` \| `ollama` \| `vllm` \| `lmstudio` |
+| `OPENAI_API_KEY` | — | required when `LLM_PROVIDER=openai` |
+| `OPENAI_BASE_URL` | OpenAI | any compatible gateway |
 | `LLM_MODEL` | `gpt-4.1` | also `HERMES_MODEL`, `OPENAI_MODEL` |
-| `OPENAI_BASE_URL` | OpenAI | point at any compatible gateway |
-| `HERMES_INFERENCE_PROVIDER` | `openai` | provider Hermes resolves credentials for |
+| `HERMES_TASK_MODEL` | — | small model for `### Task:` prompts |
+| `OLLAMA_BASE_URL` | `localhost:11434/v1` | local server; used by all three local providers |
+| `OLLAMA_MODEL` | `qwen3:8b` | must support tool calling |
+| `OLLAMA_TASK_MODEL` | — | small model for `### Task:` prompts |
+| `OLLAMA_API_KEY` | — | only behind an authenticating proxy |
+| `HERMES_TASK_ROUTING` | `true` | `false` = never route to the task model |
+| `HERMES_INFERENCE_PROVIDER` | from `LLM_PROVIDER` | override only |
 | `HERMES_SYSTEM_PROMPT_PATH` | `prompts/hermes_coordinator.md` | host prompt |
 | `HERMES_ENABLED_TOOLSETS` | `memory,session_search,skills,todo` | comma-separated Hermes toolsets |
 | `HERMES_MAX_ITERATIONS` | `12` | tool-loop cap |

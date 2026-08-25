@@ -146,7 +146,10 @@ def create_app() -> FastAPI:
             "tools": rd.get("tools"),
             "toolsets": rd.get("toolsets"),
             "ready": host.ready,
+            "provider": rd.get("provider"),
             "model": rd.get("model"),
+            "task_model": rd.get("task_model"),
+            "base_url": rd.get("base_url"),
         }
 
     @app.post("/v1/chat", response_model=ChatResponse)

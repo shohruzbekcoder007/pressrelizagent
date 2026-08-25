@@ -6,6 +6,9 @@ python -m venv .venv
 # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env      # Windows: copy .env.example .env
+# Running outside Docker? Ollama is on localhost, not host.docker.internal:
+#   LLM_PROVIDER=ollama
+#   OLLAMA_BASE_URL=http://localhost:11434/v1
 python -m app.main
 ```
 

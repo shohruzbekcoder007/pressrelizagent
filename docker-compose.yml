@@ -27,13 +27,25 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_DIR: /app/logs
       LOG_FORMAT: ${LOG_FORMAT:-json}
+      # LLM: one switch, two blocks — see .env.example
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LLM_MODEL: ${LLM_MODEL:-gpt-4.1}
+      HERMES_TASK_MODEL: ${HERMES_TASK_MODEL:-}
+      OPENAI_TASK_MODEL: ${OPENAI_TASK_MODEL:-}
+      # Local OpenAI-compatible server (Ollama / vLLM / LM Studio). The host
+      # machine is reachable at host.docker.internal — see extra_hosts below.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+      OLLAMA_TASK_MODEL: ${OLLAMA_TASK_MODEL:-}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      HERMES_TASK_ROUTING: ${HERMES_TASK_ROUTING:-true}
       HERMES_HOME: /home/appuser/.hermes
       HERMES_ENABLE_PROJECT_PLUGINS: "true"
       PYTHONPATH: /opt/hermes-agent
-      HERMES_INFERENCE_PROVIDER: ${HERMES_INFERENCE_PROVIDER:-openai}
+      # Left empty on purpose: the host derives it from LLM_PROVIDER.
+      HERMES_INFERENCE_PROVIDER: ${HERMES_INFERENCE_PROVIDER:-}
       HERMES_ENABLED_TOOLSETS: ${HERMES_ENABLED_TOOLSETS:-memory,session_search,skills,todo}
       HERMES_SYSTEM_PROMPT_PATH: /app/prompts/hermes_coordinator.md
       HERMES_MAX_ITERATIONS: ${HERMES_MAX_ITERATIONS:-12}
@@ -45,6 +57,11 @@ services:
 
     ports:
       - "${APP_PORT:-8080}:8080"
+
+    # Reach an Ollama / vLLM / LM Studio server running on the host machine.
+    # Docker Desktop provides this name already; Linux needs it spelled out.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     volumes:
       # Hermes writes memory, skills, session history and cache under

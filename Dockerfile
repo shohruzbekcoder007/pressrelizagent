@@ -57,7 +57,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HERMES_HOME=/home/appuser/.hermes \
     HERMES_ENABLE_PROJECT_PLUGINS=true \
     PYTHONPATH=/opt/hermes-agent \
-    HERMES_INFERENCE_PROVIDER=openai \
+\
     HERMES_ENABLED_TOOLSETS=memory,session_search,skills,todo \
     HERMES_SYSTEM_PROMPT_PATH=/app/prompts/hermes_coordinator.md \
     LOG_DIR=/app/logs \

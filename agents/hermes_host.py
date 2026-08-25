@@ -66,6 +66,114 @@ def _load_coordinator_prompt() -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# LLM provider selection
+# ---------------------------------------------------------------------------
+# `LLM_PROVIDER` is the only switch. It picks one row of this table, and the
+# row says which env vars carry the key, endpoint and models -- so an OpenAI
+# block and a local block can sit side by side in .env and neither leaks into
+# the other. Add a provider by adding a row.
+#
+# `hermes_provider` is the profile name handed to Hermes. It matters: the
+# `ollama` profile sends think=false, detects num_ctx and lifts the max_tokens
+# floor. Without it Ollama truncates replies at its num_predict=128 default.
+_PROVIDERS: dict[str, dict[str, Any]] = {
+    "openai": {
+        "aliases": ("oai",),
+        "key_vars": ("OPENAI_API_KEY", "LLM_API_KEY", "HERMES_API_KEY"),
+        "url_vars": ("OPENAI_BASE_URL", "HERMES_BASE_URL"),
+        "model_vars": ("HERMES_MODEL", "LLM_MODEL", "OPENAI_MODEL"),
+        "task_model_vars": ("HERMES_TASK_MODEL", "OPENAI_TASK_MODEL"),
+        "default_base_url": "https://api.openai.com/v1",
+        "default_model": "gpt-4.1",
+        "key_required": True,
+        # Hermes infers the OpenAI profile from the base URL on its own.
+        "hermes_provider": None,
+    },
+    # Local OpenAI-compatible servers. They share one env block -- point
+    # OLLAMA_BASE_URL at whichever server is running -- but keep separate
+    # Hermes profiles, because the wire quirks differ.
+    "ollama": {
+        "aliases": ("local",),
+        "key_vars": ("OLLAMA_API_KEY",),
+        "url_vars": ("OLLAMA_BASE_URL",),
+        # Deliberately not LLM_MODEL / HERMES_MODEL: an OpenAI model name left
+        # behind in the environment must not leak onto a local endpoint.
+        "model_vars": ("OLLAMA_MODEL",),
+        "task_model_vars": ("OLLAMA_TASK_MODEL",),
+        "default_base_url": "http://localhost:11434/v1",
+        "default_model": "qwen3:8b",
+        "key_required": False,
+        "hermes_provider": "ollama",
+    },
+    "vllm": {
+        "aliases": (),
+        "key_vars": ("OLLAMA_API_KEY",),
+        "url_vars": ("OLLAMA_BASE_URL",),
+        "model_vars": ("OLLAMA_MODEL",),
+        "task_model_vars": ("OLLAMA_TASK_MODEL",),
+        "default_base_url": "http://localhost:8000/v1",
+        "default_model": "",
+        "key_required": False,
+        "hermes_provider": "vllm",
+    },
+    "lmstudio": {
+        "aliases": ("lm-studio", "lm_studio"),
+        "key_vars": ("OLLAMA_API_KEY",),
+        "url_vars": ("OLLAMA_BASE_URL",),
+        "model_vars": ("OLLAMA_MODEL",),
+        "task_model_vars": ("OLLAMA_TASK_MODEL",),
+        "default_base_url": "http://localhost:1234/v1",
+        "default_model": "",
+        "key_required": False,
+        "hermes_provider": "lmstudio",
+    },
+}
+
+# Local servers accept any key, but the OpenAI SDK still demands a non-empty
+# string. This is the placeholder Hermes itself substitutes.
+_PLACEHOLDER_KEY = "no-key-required"
+
+# A chat UI runs one-shot jobs behind the scenes -- Open WebUI generates chat
+# titles, tags and follow-up suggestions by sending a prompt carrying this
+# marker through the normal chat route. They need no tools, no history and no
+# memory, so they go to the small task model instead of the main agent.
+_TASK_PROMPT_MARKER = "### task:"
+
+
+def _first_env(names: tuple[str, ...]) -> str:
+    """First non-empty value among `names`."""
+    for name in names:
+        value = _env(name)
+        if value:
+            return value
+    return ""
+
+
+def _resolve_provider() -> tuple[str, Optional[str]]:
+    """
+    Resolve `LLM_PROVIDER` to a key of `_PROVIDERS`.
+
+    An unknown name falls back to openai and returns an error string rather
+    than raising, so a typo surfaces as a clear `/ready` message instead of a
+    crash loop.
+    """
+    requested = (_env("LLM_PROVIDER") or "openai").lower()
+    for canonical, spec in _PROVIDERS.items():
+        if requested == canonical or requested in spec["aliases"]:
+            return canonical, None
+    return (
+        "openai",
+        f"Unknown LLM_PROVIDER={requested!r}; supported: "
+        + ", ".join(sorted(_PROVIDERS)),
+    )
+
+
+def _is_task_prompt(message: str) -> bool:
+    """True for a chat UI's background title/tag/follow-up prompt."""
+    return _TASK_PROMPT_MARKER in (message or "")[:400].lower()
+
+
 class HermesHostService:
     """
     Host agent with session memory and a tool-calling loop.
@@ -74,11 +182,32 @@ class HermesHostService:
     name = "hermes_host"
 
     def __init__(self) -> None:
-        self.model_name = (
-            _env("HERMES_MODEL") or _env("LLM_MODEL") or _env("OPENAI_MODEL") or "gpt-4.1"
+        self.provider, self._provider_error = _resolve_provider()
+        spec = _PROVIDERS[self.provider]
+        self._key_var = spec["key_vars"][0]
+        self._model_var = spec["model_vars"][-1]
+        self._key_required = bool(spec["key_required"])
+        self._hermes_provider = spec["hermes_provider"]
+
+        self.model_name = _first_env(spec["model_vars"]) or spec["default_model"]
+        self.base_url = _first_env(spec["url_vars"]) or spec["default_base_url"] or None
+        self.api_key = _first_env(spec["key_vars"]) or (
+            "" if self._key_required else _PLACEHOLDER_KEY
         )
-        self.api_key = _env("OPENAI_API_KEY") or _env("LLM_API_KEY") or _env("HERMES_API_KEY")
-        self.base_url = _env("OPENAI_BASE_URL") or _env("HERMES_BASE_URL") or None
+        # Optional cheap model for a chat UI's background jobs. Unset = the
+        # main agent answers them, exactly as before.
+        self.task_model = _first_env(spec["task_model_vars"])
+        self.task_routing = _env_bool("HERMES_TASK_ROUTING", True)
+        self._task_llm_obj: Any = None
+
+        # Hermes' own internals (memory provider, sub-agents) read this env var
+        # directly; keep it in step with LLM_PROVIDER unless the operator set
+        # it explicitly.
+        if not _env("HERMES_INFERENCE_PROVIDER"):
+            os.environ["HERMES_INFERENCE_PROVIDER"] = (
+                self._hermes_provider or self.provider
+            )
+
         self.max_iterations = _env_int("HERMES_MAX_ITERATIONS", 12)
         self.session_limit = _env_int("HERMES_SESSION_HISTORY_LIMIT", 6)
         self.skip_memory = _env_bool("HERMES_SKIP_MEMORY", False)
@@ -96,8 +225,22 @@ class HermesHostService:
             if self._ready:
                 return self.readiness()
 
-            if not self.api_key:
-                self._last_error = "OPENAI_API_KEY / HERMES_API_KEY not set"
+            if self._provider_error:
+                self._last_error = self._provider_error
+                self._ready = False
+                return self.readiness()
+
+            if self._key_required and not self.api_key:
+                self._last_error = (
+                    f"{self._key_var} not set (LLM_PROVIDER={self.provider})"
+                )
+                self._ready = False
+                return self.readiness()
+
+            if not self.model_name:
+                self._last_error = (
+                    f"{self._model_var} not set (LLM_PROVIDER={self.provider})"
+                )
                 self._ready = False
                 return self.readiness()
 
@@ -113,7 +256,14 @@ class HermesHostService:
                 self._backend = "hermes"
                 self._ready = True
                 self._last_error = None
-                logger.info("Hermes host ready (backend=hermes model=%s)", self.model_name)
+                logger.info(
+                    "Hermes host ready (backend=hermes provider=%s model=%s "
+                    "task_model=%s base_url=%s)",
+                    self.provider,
+                    self.model_name,
+                    self.task_model or "-",
+                    self.base_url,
+                )
                 return self.readiness()
 
             # Hermes-lite: same architecture without hermes package
@@ -122,9 +272,13 @@ class HermesHostService:
                 self._ready = True
                 self._last_error = None
                 logger.info(
-                    "Hermes host ready (backend=hermes_lite model=%s) — "
-                    "Hermes package missing or failed; using tool-calling host",
+                    "Hermes host ready (backend=hermes_lite provider=%s model=%s "
+                    "task_model=%s base_url=%s) — Hermes package missing or "
+                    "failed; using tool-calling host",
+                    self.provider,
                     self.model_name,
+                    self.task_model or "-",
+                    self.base_url,
                 )
                 return self.readiness()
 
@@ -172,7 +326,11 @@ class HermesHostService:
         }
         if self.base_url:
             kwargs["base_url"] = self.base_url
-        # OpenAI path: don't force provider string
+        # Set only where the profile matters -- on the OpenAI path Hermes
+        # infers it from the base URL, but for a local server the string is
+        # what selects the right wire quirks.
+        if self._hermes_provider:
+            kwargs["provider"] = self._hermes_provider
         return kwargs
 
     def _enabled_toolsets(self) -> list[str]:
@@ -253,6 +411,9 @@ class HermesHostService:
             "host": "hermes_host",
             "architecture": "Hermes host (memory/context) → tools",
             "model": self.model_name,
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "task_model": self.task_model or None,
             "skip_memory": self.skip_memory,
             "session_count": len(self._sessions),
             "error": self._last_error,
@@ -313,6 +474,13 @@ class HermesHostService:
                 self._backend,
             )
 
+            # A chat UI's background title/tag/follow-up job: answer it on the
+            # small model. Falls through to the main agent if it fails.
+            if self.task_routing and self.task_model and _is_task_prompt(message):
+                task_result = self._chat_task(message, sid)
+                if task_result is not None:
+                    return task_result
+
             if self._backend == "hermes":
                 return self._chat_hermes(message, sid)
             return self._chat_hermes_lite(message, sid)
@@ -326,6 +494,65 @@ class HermesHostService:
                 "retryable": True,
                 "session_id": session_id,
             }
+
+    def _task_llm(self) -> Any:
+        """Lazily built client for the task model — same endpoint, small model."""
+        if self._task_llm_obj is None:
+            from langchain_openai import ChatOpenAI
+
+            kwargs: dict[str, Any] = {
+                "model": self.task_model,
+                "api_key": self.api_key,
+                "temperature": 0,
+            }
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            self._task_llm_obj = ChatOpenAI(**kwargs)
+        return self._task_llm_obj
+
+    def _chat_task(self, message: str, sid: str) -> dict[str, Any] | None:
+        """
+        One-shot completion on the task model: no tools, no history, no memory.
+
+        Returns None when the call fails, so the caller can fall through to the
+        main agent rather than surface an error for a background job.
+        """
+        from langchain_core.messages import HumanMessage
+
+        try:
+            result = self._task_llm().invoke([HumanMessage(content=message)])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "task model %s failed, falling back to the main agent: %s",
+                self.task_model,
+                exc,
+            )
+            return None
+
+        content = getattr(result, "content", "")
+        if isinstance(content, list):
+            final = " ".join(
+                b.get("text", str(b)) if isinstance(b, dict) else str(b)
+                for b in content
+            )
+        else:
+            final = str(content or "")
+
+        if not final.strip():
+            logger.warning("task model %s returned nothing", self.task_model)
+            return None
+
+        logger.info("task prompt answered by task_model=%s", self.task_model)
+        return {
+            "success": True,
+            "response": final,
+            "error": None,
+            "session_id": sid,
+            "backend": self._backend,
+            "tool_call_count": 0,
+            "agents_used": ["task_model"],
+            "mode": "task",
+        }
 
     def _chat_hermes(self, message: str, sid: str) -> dict[str, Any]:
         from run_agent import AIAgent  # type: ignore[import-not-found]
