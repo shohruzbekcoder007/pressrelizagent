@@ -143,7 +143,7 @@ Set `API_BEARER_TOKEN` to require `Authorization: Bearer …` on `/v1/chat`.
 Local: see [install_local.md](install_local.md) · Docker: see [install.md](install.md)
 
 ```bash
-curl -s localhost:8080/v1/chat -H 'content-type: application/json' \
+curl -s localhost:7000/v1/chat -H 'content-type: application/json' \
   -d '{"message":"salom"}'
 ```
 
@@ -172,6 +172,7 @@ All via environment (`.env`, see `.env.example`).
 | `HERMES_TASK_ROUTING` | `true` | `false` = never route to the task model |
 | `HERMES_INFERENCE_PROVIDER` | from `LLM_PROVIDER` | override only |
 | `HERMES_SYSTEM_PROMPT_PATH` | `prompts/hermes_coordinator.md` | host prompt |
+| `HERMES_LOAD_SOUL_IDENTITY` | `true` | load `prompts/soul.md` as the agent identity |
 | `HERMES_ENABLED_TOOLSETS` | `memory,session_search,skills,todo` | comma-separated Hermes toolsets |
 | `HERMES_MAX_ITERATIONS` | `12` | tool-loop cap |
 | `HERMES_SESSION_HISTORY_LIMIT` | `6` | turns kept per session |

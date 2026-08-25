@@ -30,6 +30,20 @@ if [[ ! -f "$HERMES_HOME/config.yaml" ]]; then
   fi
 fi
 
+# Agent identity. Hermes reads $HERMES_HOME/SOUL.md as system-prompt slot #1;
+# with no SOUL.md it falls back to its own "You are Hermes Agent" identity.
+# Re-seeded on every start so the deployed identity is the one in version
+# control rather than one the agent drifted into.
+if [[ -f "$APP_HOME/prompts/soul.md" ]]; then
+  cp "$APP_HOME/prompts/soul.md" "$HERMES_HOME/SOUL.md"
+  log "Installed SOUL.md (agent identity)"
+fi
+
+# Both copies above run as root; hand them back so Hermes can rewrite them.
+if [[ "$(id -u)" -eq 0 ]]; then
+  chown appuser:appuser "$HERMES_HOME/config.yaml" "$HERMES_HOME/SOUL.md" 2>/dev/null || true
+fi
+
 log "Starting Hermes host service"
 
 cd "$APP_HOME"

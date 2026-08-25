@@ -56,7 +56,9 @@ services:
       HEALTHCHECK_URL: http://127.0.0.1:8080/health
 
     ports:
-      - "${APP_PORT:-8080}:8080"
+      # host:container — APP_PORT is the in-container bind port (always
+      # 8080); HOST_PORT is what the outside world connects to.
+      - "${HOST_PORT:-7000}:8080"
 
     # Reach an Ollama / vLLM / LM Studio server running on the host machine.
     # Docker Desktop provides this name already; Linux needs it spelled out.

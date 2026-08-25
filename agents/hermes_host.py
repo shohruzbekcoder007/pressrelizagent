@@ -319,6 +319,12 @@ class HermesHostService:
             "enabled_toolsets": self._enabled_toolsets(),
             "skip_memory": self.skip_memory,
             "skip_context_files": _env_bool("HERMES_SKIP_CONTEXT_FILES", True),
+            # SOUL.md is Hermes' identity slot. It is read only when this is
+            # on or skip_context_files is off -- and with both off Hermes
+            # falls back to its own hardcoded "You are Hermes Agent, ...
+            # created by Nous Research" identity, which the agent then
+            # repeats to users.
+            "load_soul_identity": _env_bool("HERMES_LOAD_SOUL_IDENTITY", True),
             "ephemeral_system_prompt": self.system_prompt,
             "platform": "hermes-host",
             "api_key": self.api_key,
