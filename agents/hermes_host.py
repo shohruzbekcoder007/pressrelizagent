@@ -1,13 +1,13 @@
 """
-Variant 2: Hermes host agent + SQL as a tool.
+Hermes host agent — starter.
 
 Architecture:
 
   User → Hermes host (conversation + memory)
-            └─ tool sql_ask → LangGraph/LangChain SQL agent → PostgreSQL
+            └─ tools registered in `_host_langchain_tools()`
 
 If the Hermes package is unavailable, a Hermes-lite outer agent is used
-(same design: host tool-calling loop + sql_ask tool + session history).
+(same design: host tool-calling loop + tools + session history).
 """
 
 from __future__ import annotations
@@ -61,14 +61,14 @@ def _load_coordinator_prompt() -> str:
     if path.is_file():
         return path.read_text(encoding="utf-8")
     return (
-        "You are a host agent. Use the sql_ask tool for any database facts. "
-        "Never invent data."
+        "You are a helpful host agent. Use the tools available to you "
+        "when they apply. Never invent facts."
     )
 
 
 class HermesHostService:
     """
-    Host agent with session memory. Tool sql_ask → LangGraph SQL agent.
+    Host agent with session memory and a tool-calling loop.
     """
 
     name = "hermes_host"
@@ -100,45 +100,6 @@ class HermesHostService:
                 self._last_error = "OPENAI_API_KEY / HERMES_API_KEY not set"
                 self._ready = False
                 return self.readiness()
-
-            # Warm SQL agent (tool target)
-            try:
-                from agents.sql_agent import get_sql_agent
-
-                sql = get_sql_agent()
-                if not sql.ready:
-                    sql.initialize()
-                if not sql.ready:
-                    self._last_error = (
-                        "Inner SQL agent not ready: "
-                        f"{sql.readiness().get('error')}"
-                    )
-                    self._ready = False
-                    return self.readiness()
-            except Exception as exc:  # noqa: BLE001
-                self._last_error = f"SQL agent init failed: {exc}"
-                self._ready = False
-                logger.error("%s", self._last_error)
-                return self.readiness()
-
-            # Register Hermes tools if possible
-            try:
-                from agents.sql_bridge_tool import register_hermes_tools
-
-                register_hermes_tools()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("register_hermes_tools: %s", exc)
-
-            try:
-                from agents.rag_agent import is_enabled as rag_enabled
-                from agents.rag_bridge_tool import (
-                    register_hermes_tools as register_docs_tools,
-                )
-
-                if rag_enabled():
-                    register_docs_tools()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("register_docs_tools: %s", exc)
 
             try:
                 from hermes_cli.plugins import discover_plugins  # type: ignore
@@ -205,7 +166,7 @@ class HermesHostService:
             "skip_memory": self.skip_memory,
             "skip_context_files": _env_bool("HERMES_SKIP_CONTEXT_FILES", True),
             "ephemeral_system_prompt": self.system_prompt,
-            "platform": "hermes-sql-host",
+            "platform": "hermes-host",
             "api_key": self.api_key,
             "reasoning_config": self._reasoning_config(),
         }
@@ -215,39 +176,23 @@ class HermesHostService:
         return kwargs
 
     def _enabled_toolsets(self) -> list[str]:
-        """
-        Parse HERMES_ENABLED_TOOLSETS. When RAG is on, ensure docs_bridge is
-        present even if .env only lists sql_bridge (common misconfig).
-        """
-        raw = _env("HERMES_ENABLED_TOOLSETS") or "sql_bridge,docs_bridge"
-        sets = [t.strip() for t in raw.split(",") if t.strip()]
-        if not sets:
-            sets = ["sql_bridge"]
-        try:
-            from agents.rag_agent import is_enabled as rag_enabled
-
-            if rag_enabled() and "docs_bridge" not in sets:
-                sets.append("docs_bridge")
-                logger.info(
-                    "RAG enabled — appended docs_bridge to toolsets → %s", sets
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("toolset RAG check: %s", exc)
-        return sets
+        """Parse HERMES_ENABLED_TOOLSETS (empty by default in the starter)."""
+        raw = _env("HERMES_ENABLED_TOOLSETS")
+        return [t.strip() for t in raw.split(",") if t.strip()]
 
     def _host_langchain_tools(self) -> list[Any]:
-        """sql_ask (+ docs_ask when RAG enabled)."""
-        from agents.sql_bridge_tool import as_langchain_tool
+        """
+        Tools exposed to the host agent.
 
-        tools: list[Any] = [as_langchain_tool()]
+        Add your own here — see `agents/example_tool.py` for the shape.
+        """
+        tools: list[Any] = []
         try:
-            from agents.rag_agent import is_enabled as rag_enabled
-            from agents.rag_bridge_tool import as_langchain_tool as docs_tool
+            from agents.example_tool import as_langchain_tools
 
-            if rag_enabled():
-                tools.append(docs_tool())
+            tools.extend(as_langchain_tools())
         except Exception as exc:  # noqa: BLE001
-            logger.debug("docs_ask tool not added to hermes_lite: %s", exc)
+            logger.debug("example tools not loaded: %s", exc)
         return tools
 
     def _try_init_hermes_lite(self) -> bool:
@@ -264,7 +209,6 @@ class HermesHostService:
                 llm_kwargs["base_url"] = self.base_url
             llm = ChatOpenAI(**llm_kwargs)
             tools = self._host_langchain_tools()
-            # Host: sql_ask (+ docs_ask); SQL/RAG internals stay in their agents
             self._lite_graph = create_react_agent(
                 llm,
                 tools,
@@ -303,28 +247,17 @@ class HermesHostService:
         return self._ready
 
     def readiness(self) -> dict[str, Any]:
-        sql_rd: dict[str, Any] = {}
-        try:
-            from agents.sql_agent import get_sql_agent
-
-            sql_rd = get_sql_agent().readiness()
-        except Exception as exc:  # noqa: BLE001
-            sql_rd = {"ready": False, "error": str(exc)}
         return {
-            "ready": self._ready and bool(sql_rd.get("ready")),
+            "ready": self._ready,
             "backend": self._backend,
-            "host": "hermes_variant_2",
-            "architecture": (
-                "Hermes host (memory/context) → tool sql_ask → "
-                "LangGraph SQL agent → PostgreSQL"
-            ),
+            "host": "hermes_host",
+            "architecture": "Hermes host (memory/context) → tools",
             "model": self.model_name,
             "skip_memory": self.skip_memory,
             "session_count": len(self._sessions),
-            "sql_agent": sql_rd,
             "error": self._last_error,
-            "tool": "sql_ask",
-            "toolset": "sql_bridge",
+            "tools": [getattr(t, "name", str(t)) for t in self._host_langchain_tools()],
+            "toolsets": self._enabled_toolsets(),
         }
 
     def clear_session(self, session_id: str) -> None:
@@ -440,7 +373,7 @@ class HermesHostService:
             "error": None,
             "session_id": sid,
             "backend": "hermes",
-            "agents_used": ["hermes_host", "sql_ask|docs_ask"],
+            "agents_used": ["hermes_host"],
             "mode": "hermes_tool_host",
         }
 
@@ -495,14 +428,10 @@ class HermesHostService:
             with _lock:
                 self._sessions[sid] = new_hist
 
-        # Count sql_ask mentions roughly
+        # Count tool calls made during this turn
         tool_hits = 0
         for m in out_msgs or []:
-            tcs = getattr(m, "tool_calls", None) or []
-            for tc in tcs:
-                name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
-                if name == "sql_ask":
-                    tool_hits += 1
+            tool_hits += len(getattr(m, "tool_calls", None) or [])
 
         return {
             "success": bool((final or "").strip()),
@@ -511,8 +440,8 @@ class HermesHostService:
             "session_id": sid,
             "backend": "hermes_lite",
             "tool_call_count": tool_hits,
-            "agents_used": ["hermes_host", "sql_ask→langgraph_sql"],
-            "mode": "hermes_tool_sql",
+            "agents_used": ["hermes_host"],
+            "mode": "hermes_tool_host",
         }
 
 

@@ -1,5 +1,0 @@
-name: sql-bridge
-version: "1.0.0"
-description: >
-  Hermes toolset sql_bridge: sql_ask wraps the LangGraph/LangChain SQL agent.
-  Context and multi-turn stay with the Hermes host agent.

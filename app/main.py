@@ -1,5 +1,5 @@
 """
-Process entrypoint for the LangChain SQLAgent service.
+Process entrypoint for the Hermes host service.
 
 Usage:
   python -m app.main
@@ -46,7 +46,7 @@ def main() -> None:
     }
 
     logger.info("=" * 60)
-    logger.info("Hermes host + SQL tool — server starting (Variant 2)")
+    logger.info("Hermes host — server starting")
     logger.info(
         "Bind=%s Port=%s Workers=%s Reload=%s",
         bind_host,
@@ -55,10 +55,6 @@ def main() -> None:
         reload,
     )
     logger.info("LLM_MODEL=%s", os.getenv("LLM_MODEL", "gpt-4.1"))
-    logger.info(
-        "DATABASE_URL configured=%s",
-        bool(os.getenv("DATABASE_URL") or os.getenv("SQL_DATABASE_URI")),
-    )
     logger.info("=" * 60)
 
     try:

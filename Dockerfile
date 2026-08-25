@@ -1,5 +1,5 @@
 # =============================================================================
-# Variant 2: Hermes host + sql_ask tool → LangGraph SQL agent
+# Hermes host agent - starter
 # =============================================================================
 
 FROM python:3.12-slim-bookworm AS builder
@@ -49,11 +49,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
     APP_HOME=/app \
-    HR_APP_ROOT=/app \
     HERMES_HOME=/home/appuser/.hermes \
     HERMES_ENABLE_PROJECT_PLUGINS=true \
-    HERMES_ENABLED_TOOLSETS=sql_bridge,docs_bridge \
-    SYSTEM_PROMPT_PATH=/app/prompts/sql_agent_system.md \
+    HERMES_ENABLED_TOOLSETS= \
     HERMES_SYSTEM_PROMPT_PATH=/app/prompts/hermes_coordinator.md \
     LOG_DIR=/app/logs \
     APP_HOST=0.0.0.0 \
@@ -79,7 +77,6 @@ WORKDIR /app
 COPY --chown=appuser:appuser agents ./agents
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser prompts ./prompts
-COPY --chown=appuser:appuser plugins ./plugins
 COPY --chown=appuser:appuser config ./config
 COPY --chown=appuser:appuser scripts ./scripts
 COPY --chown=appuser:appuser requirements.txt pyproject.toml README.md ./
@@ -89,8 +86,6 @@ RUN sed -i 's/\r$//' /app/scripts/*.sh \
     && chmod +x /app/scripts/*.sh \
     && mkdir -p /app/logs /app/data \
         /home/appuser/.hermes/plugins /home/appuser/.hermes/logs \
-        /home/appuser/.rag/chroma \
-    && if [ -d /app/plugins/sql-bridge ]; then cp -a /app/plugins/sql-bridge /home/appuser/.hermes/plugins/sql-bridge; fi \
     && if [ -f /app/config/hermes_config.yaml ]; then cp /app/config/hermes_config.yaml /home/appuser/.hermes/config.yaml; fi \
     && chown -R appuser:appuser /app/logs /app/data /home/appuser
 

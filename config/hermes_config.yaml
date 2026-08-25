@@ -1,4 +1,4 @@
-# Hermes profile for host agent (Variant 2)
+# Hermes profile for the host agent (starter)
 _config_version: 21
 
 model:
@@ -8,14 +8,12 @@ agent:
   max_iterations: 12
 
 plugins:
-  enabled:
-    - sql-bridge
+  enabled: []
   disabled: []
 
 tools:
   cli:
-    enabled:
-      - sql_bridge
+    enabled: []
     disabled:
       - terminal
       - browser

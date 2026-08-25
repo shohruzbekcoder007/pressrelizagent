@@ -9,21 +9,7 @@ python-dotenv>=1.0.1,<2.0.0
 python-json-logger>=2.0.7,<4.0.0
 typing-extensions>=4.12.0,<5.0.0
 
-# LangChain SQL toolkit + agent (Langflow-compatible)
-langchain-community>=0.3.0
+# Host agent: LLM + tool-calling loop (hermes_lite fallback)
 langchain-openai>=0.2.0
 langchain-core>=0.3.0
 langgraph>=0.2.0
-
-# PostgreSQL (SQLAlchemy URI uses postgresql+psycopg://)
-SQLAlchemy>=2.0.0,<3.0.0
-psycopg[binary]>=3.2.0,<4.0.0
-# fallback if some libs still import psycopg2 by name
-psycopg2-binary>=2.9.9,<3.0.0
-
-# Document RAG (PDF/Word → Chroma); default embeddings via OpenAI
-chromadb>=0.5.0,<1.1.0
-pypdf>=5.0.0,<6.0.0
-python-docx>=1.1.0,<2.0.0
-langchain-text-splitters>=0.3.0,<1.0.0
-# Optional local models (BAAI/bge-m3): pip install -r requirements-rag-local.txt

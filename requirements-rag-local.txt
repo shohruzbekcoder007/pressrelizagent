@@ -1,9 +1,0 @@
-# Optional: local embedding models (e.g. BAAI/bge-m3)
-# pip install -r requirements-rag-local.txt
-#
-# Heavy (torch). Only needed when:
-#   RAG_EMBED_PROVIDER=local
-#   RAG_EMBED_MODEL=BAAI/bge-m3
-
-sentence-transformers>=3.0.0,<6.0.0
-langchain-huggingface>=0.1.0,<1.0.0

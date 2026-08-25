@@ -49,15 +49,9 @@ logs/*
 *.log
 *.log.*
 
-# Self-improving store (generated at runtime)
-data/*.json
-data/*.json.tmp
+# Runtime state
+data/*
 !data/.gitkeep
-
-# RAG: user PDFs/Word/FAQ + local Chroma indexes (not for git)
-data/rag/**
-!data/rag/.gitkeep
-!data/rag/chroma/.gitkeep
 
 # IDE / OS
 .idea/
