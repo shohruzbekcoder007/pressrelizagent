@@ -2,15 +2,15 @@
 # Hermes host agent - starter
 # =============================================================================
 
-name: ai-agents
+name: pressrelizagent
 
 services:
   app:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ai-agents:0.3.0
-    container_name: ai-agents
+    image: pressrelizagent:0.3.0
+    container_name: pressrelizagent
     restart: unless-stopped
 
     env_file:
@@ -19,7 +19,7 @@ services:
         required: false
 
     environment:
-      APP_NAME: ${APP_NAME:-ai-agents}
+      APP_NAME: ${APP_NAME:-PressRelizAgent}
       APP_ENV: ${APP_ENV:-production}
       APP_HOST: 0.0.0.0
       APP_PORT: 8080
@@ -90,8 +90,8 @@ services:
 
 volumes:
   hermes_home:
-    name: ai-agents-hermes-home
+    name: pressrelizagent-hermes-home
 
 networks:
   default:
-    name: ai-agents-net
+    name: pressrelizagent-net

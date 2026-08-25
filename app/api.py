@@ -81,7 +81,7 @@ def _check_bearer(
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title=os.getenv("APP_NAME", "ai-agents"),
+        title=os.getenv("APP_NAME", "PressRelizAgent"),
         version=__version__,
         description=(
             "Hermes host agent with session memory and a tool-calling loop. "
@@ -112,7 +112,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, Any]:
-        return {"status": "ok", "service": os.getenv("APP_NAME", "ai-agents")}
+        return {"status": "ok", "service": os.getenv("APP_NAME", "PressRelizAgent")}
 
     @app.get("/ready")
     def ready() -> dict[str, Any]:
@@ -136,7 +136,7 @@ def create_app() -> FastAPI:
         host = get_hermes_host()
         rd = host.readiness()
         return {
-            "service": os.getenv("APP_NAME", "ai-agents"),
+            "service": os.getenv("APP_NAME", "PressRelizAgent"),
             "version": __version__,
             "design": "hermes-host",
             "architecture": rd.get("architecture"),
