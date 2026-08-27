@@ -1,0 +1,10 @@
+name: pressreliz
+version: "0.1.0"
+description: >
+  PressRelizAgent tools. Registers the `pressreliz` toolset. `raw_llm` sends a
+  prompt straight to the configured model with no agent system prompt, no
+  conversation history, no memory and no tools.
+author: PressRelizAgent
+kind: standalone
+provides_tools:
+  - raw_llm

@@ -8,7 +8,10 @@ agent:
   max_iterations: 12
 
 plugins:
-  enabled: []
+  # Standalone plugins are opt-in: a plugin present in
+  # $HERMES_HOME/plugins but missing here is silently skipped.
+  enabled:
+    - pressreliz
   disabled: []
 
 tools:

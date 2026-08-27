@@ -22,12 +22,27 @@ if [[ "$(id -u)" -eq 0 ]]; then
   chown -R appuser:appuser "$APP_HOME/data" 2>/dev/null || true
 fi
 
-# Hermes config
-if [[ ! -f "$HERMES_HOME/config.yaml" ]]; then
-  if [[ -f "$APP_HOME/config/hermes_config.yaml" ]]; then
-    cp "$APP_HOME/config/hermes_config.yaml" "$HERMES_HOME/config.yaml"
-    log "Installed hermes config.yaml"
-  fi
+# Hermes config. Re-seeded on every start, like SOUL.md below: the repo copy
+# is the source of truth. Seeding only when absent meant an edit here -- say
+# enabling a plugin -- silently never reached an existing volume.
+if [[ -f "$APP_HOME/config/hermes_config.yaml" ]]; then
+  cp "$APP_HOME/config/hermes_config.yaml" "$HERMES_HOME/config.yaml"
+  log "Installed hermes config.yaml"
+fi
+
+# Hermes plugins. A standalone plugin is only loaded from $HERMES_HOME/plugins
+# (or ./.hermes/plugins), never from the app tree, so each one is copied in.
+# Replaced rather than merged so a file deleted from the repo also disappears
+# here. This is how a custom tool reaches the real Hermes backend at all --
+# AIAgent has no parameter for injecting Python tools.
+if [[ -d "$APP_HOME/plugins" ]]; then
+  for plugin_dir in "$APP_HOME"/plugins/*/; do
+    [[ -d "$plugin_dir" ]] || continue
+    plugin_name="$(basename "$plugin_dir")"
+    rm -rf "${HERMES_HOME:?}/plugins/$plugin_name"
+    cp -a "$plugin_dir" "$HERMES_HOME/plugins/$plugin_name"
+    log "Installed Hermes plugin $plugin_name"
+  done
 fi
 
 # Agent identity. Hermes reads $HERMES_HOME/SOUL.md as system-prompt slot #1;
@@ -39,9 +54,10 @@ if [[ -f "$APP_HOME/prompts/soul.md" ]]; then
   log "Installed SOUL.md (agent identity)"
 fi
 
-# Both copies above run as root; hand them back so Hermes can rewrite them.
+# The copies above run as root; hand them back so Hermes can read and rewrite.
 if [[ "$(id -u)" -eq 0 ]]; then
   chown appuser:appuser "$HERMES_HOME/config.yaml" "$HERMES_HOME/SOUL.md" 2>/dev/null || true
+  chown -R appuser:appuser "$HERMES_HOME/plugins" 2>/dev/null || true
 fi
 
 log "Starting Hermes host service"

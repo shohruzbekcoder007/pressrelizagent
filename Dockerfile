@@ -58,7 +58,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HERMES_ENABLE_PROJECT_PLUGINS=true \
     PYTHONPATH=/opt/hermes-agent \
 \
-    HERMES_ENABLED_TOOLSETS=memory,session_search,skills,todo \
+    HERMES_ENABLED_TOOLSETS=memory,session_search,skills,todo,pressreliz \
     HERMES_SYSTEM_PROMPT_PATH=/app/prompts/hermes_coordinator.md \
     LOG_DIR=/app/logs \
     APP_HOST=0.0.0.0 \
@@ -84,6 +84,7 @@ WORKDIR /app
 COPY --chown=appuser:appuser agents ./agents
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser prompts ./prompts
+COPY --chown=appuser:appuser plugins ./plugins
 COPY --chown=appuser:appuser config ./config
 COPY --chown=appuser:appuser scripts ./scripts
 COPY --chown=appuser:appuser requirements.txt pyproject.toml README.md ./

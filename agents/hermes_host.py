@@ -12,6 +12,7 @@ If the Hermes package is unavailable, a Hermes-lite outer agent is used
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -174,6 +175,92 @@ def _is_task_prompt(message: str) -> bool:
     return _TASK_PROMPT_MARKER in (message or "")[:400].lower()
 
 
+# Hermes does not put every tool in front of the model. Past a certain count it
+# defers them behind a gateway: the model calls `tool_call` (or `tool_describe`)
+# and passes the real tool's name as an argument. Reporting the gateway name
+# would say `tool_call` ran when `raw_llm` did.
+_GATEWAY_TOOLS = {"tool_call", "tool_describe"}
+
+
+def _gateway_target(arguments: Any) -> Optional[str]:
+    """The real tool name inside a gateway call's arguments, if readable."""
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(arguments, dict):
+        target = arguments.get("name")
+        if isinstance(target, str) and target.strip():
+            return target.strip()
+    return None
+
+
+def _tool_calls_in(messages: Any) -> list[dict[str, Any]]:
+    """
+    Tool calls recorded in a slice of Hermes conversation messages.
+
+    Hermes hands back plain dicts on the OpenAI wire shape, but the lite path
+    yields LangChain message objects, so both are probed. Anything without a
+    recognizable name is skipped rather than guessed at. Gateway calls are
+    unwrapped to the tool they actually invoked, keeping the gateway in `via`.
+    """
+    called: list[dict[str, Any]] = []
+    for msg in messages or []:
+        if isinstance(msg, dict):
+            raw_calls = msg.get("tool_calls")
+        else:
+            raw_calls = getattr(msg, "tool_calls", None)
+        for call in raw_calls or []:
+            if isinstance(call, dict):
+                fn = call.get("function") or {}
+                name = fn.get("name") or call.get("name")
+                arguments = fn.get("arguments", call.get("args"))
+            else:
+                fn_obj = getattr(call, "function", None)
+                name = getattr(fn_obj, "name", None) or getattr(call, "name", None)
+                arguments = getattr(fn_obj, "arguments", None) or getattr(
+                    call, "args", None
+                )
+            if not name:
+                continue
+            name = str(name)
+            if name in _GATEWAY_TOOLS:
+                target = _gateway_target(arguments)
+                if target:
+                    called.append({"name": target, "via": name})
+                    continue
+            called.append({"name": name})
+    return called
+
+
+def resolve_llm_endpoint() -> dict[str, Any]:
+    """
+    Model, endpoint and key for the provider `LLM_PROVIDER` selects.
+
+    Public because tools need the same LLM the host agent runs on without
+    going through the agent loop -- see `plugins/pressreliz/raw_llm.py`. One
+    resolver means a tool can never end up pointed at a different endpoint
+    than the agent that called it.
+    """
+    provider, error = _resolve_provider()
+    spec = _PROVIDERS[provider]
+    key_required = bool(spec["key_required"])
+    return {
+        "provider": provider,
+        "error": error,
+        "model": _first_env(spec["model_vars"]) or spec["default_model"],
+        "task_model": _first_env(spec["task_model_vars"]),
+        "base_url": _first_env(spec["url_vars"]) or spec["default_base_url"] or None,
+        "api_key": _first_env(spec["key_vars"])
+        or ("" if key_required else _PLACEHOLDER_KEY),
+        "key_required": key_required,
+        "key_var": spec["key_vars"][0],
+        "model_var": spec["model_vars"][-1],
+        "hermes_provider": spec["hermes_provider"],
+    }
+
+
 class HermesHostService:
     """
     Host agent with session memory and a tool-calling loop.
@@ -182,21 +269,20 @@ class HermesHostService:
     name = "hermes_host"
 
     def __init__(self) -> None:
-        self.provider, self._provider_error = _resolve_provider()
-        spec = _PROVIDERS[self.provider]
-        self._key_var = spec["key_vars"][0]
-        self._model_var = spec["model_vars"][-1]
-        self._key_required = bool(spec["key_required"])
-        self._hermes_provider = spec["hermes_provider"]
+        endpoint = resolve_llm_endpoint()
+        self.provider = endpoint["provider"]
+        self._provider_error = endpoint["error"]
+        self._key_var = endpoint["key_var"]
+        self._model_var = endpoint["model_var"]
+        self._key_required = endpoint["key_required"]
+        self._hermes_provider = endpoint["hermes_provider"]
 
-        self.model_name = _first_env(spec["model_vars"]) or spec["default_model"]
-        self.base_url = _first_env(spec["url_vars"]) or spec["default_base_url"] or None
-        self.api_key = _first_env(spec["key_vars"]) or (
-            "" if self._key_required else _PLACEHOLDER_KEY
-        )
+        self.model_name = endpoint["model"]
+        self.base_url = endpoint["base_url"]
+        self.api_key = endpoint["api_key"]
         # Optional cheap model for a chat UI's background jobs. Unset = the
         # main agent answers them, exactly as before.
-        self.task_model = _first_env(spec["task_model_vars"])
+        self.task_model = endpoint["task_model"]
         self.task_routing = _env_bool("HERMES_TASK_ROUTING", True)
         self._task_llm_obj: Any = None
 
@@ -406,6 +492,29 @@ class HermesHostService:
             logger.error("%s", self._last_error)
             return False
 
+    def _backend_tools(self) -> list[str]:
+        """
+        Tool names the *active* backend really exposes.
+
+        These differ per backend and reporting the wrong list is worse than
+        reporting none: on `hermes` the tools come from Hermes' own registry
+        via the enabled toolsets, and the LangChain list is never consulted --
+        `AIAgent` has no parameter for injecting Python tools. Reading it there
+        advertised `echo`, which the agent could not call, and hid `raw_llm`,
+        which it could.
+        """
+        if self._backend == "hermes":
+            try:
+                from toolsets import resolve_multiple_toolsets  # type: ignore
+
+                return sorted(
+                    set(resolve_multiple_toolsets(self._enabled_toolsets()) or [])
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("cannot resolve Hermes toolsets: %s", exc)
+                return []
+        return [getattr(t, "name", str(t)) for t in self._host_langchain_tools()]
+
     @property
     def ready(self) -> bool:
         return self._ready
@@ -423,7 +532,7 @@ class HermesHostService:
             "skip_memory": self.skip_memory,
             "session_count": len(self._sessions),
             "error": self._last_error,
-            "tools": [getattr(t, "name", str(t)) for t in self._host_langchain_tools()],
+            "tools": self._backend_tools(),
             "toolsets": self._enabled_toolsets(),
         }
 
@@ -599,6 +708,14 @@ class HermesHostService:
             final = str(result)
             messages = None
 
+        # Only this turn's calls: `messages` comes back as the whole
+        # conversation, so counting all of it would re-report every tool call
+        # made in earlier turns on every reply.
+        prior_len = len(history) if history else 0
+        tools_called = _tool_calls_in(
+            list(messages)[prior_len:] if messages is not None else None
+        )
+
         if messages is not None and not self.skip_memory and not failed:
             trimmed = list(messages)
             limit = max(4, self.session_limit * 2)
@@ -617,6 +734,8 @@ class HermesHostService:
                 "retryable": bool(result.get("retryable")),
                 "session_id": sid,
                 "backend": "hermes",
+                "tools_called": tools_called or None,
+                "tool_call_count": len(tools_called),
                 "agents_used": ["hermes_host"],
                 "mode": "hermes_tool_host",
             }
@@ -627,6 +746,8 @@ class HermesHostService:
             "error": None if (final or "").strip() else "Empty host response",
             "session_id": sid,
             "backend": "hermes",
+            "tools_called": tools_called or None,
+            "tool_call_count": len(tools_called),
             "agents_used": ["hermes_host"],
             "mode": "hermes_tool_host",
         }
