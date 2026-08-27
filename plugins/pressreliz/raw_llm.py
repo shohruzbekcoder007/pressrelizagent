@@ -64,6 +64,44 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _reasoning_off_kwargs(endpoint: dict[str, Any]) -> dict[str, Any]:
+    """
+    The wire flags that stop a thinking model from thinking, or `{}`.
+
+    Hermes applies these through its provider profile, but this tool calls the
+    endpoint directly and so gets none of that. Against a reasoning model the
+    difference is not cosmetic: the reply lands in a separate `reasoning`
+    field and `content` comes back empty once the token budget is spent
+    thinking -- which this tool then reports as "model returned an empty
+    reply".
+
+    Two flags because no single one covers the local servers: Ollama's
+    /v1 route ignores `think` but honours `reasoning_effort`, and vLLM is the
+    other way round on some builds. Endpoints that recognize neither ignore
+    both.
+
+    Sent only on a local profile. `hermes_provider` is exactly that marker --
+    it is None for OpenAI, whose gpt-4.1 rejects `reasoning_effort` outright.
+    """
+    if not endpoint.get("hermes_provider"):
+        return {}
+    if _env_bool("HERMES_REASONING_ENABLED", False):
+        # Thinking is server-default-on for these backends. Forcing it back on
+        # explicitly risks a 400, so leave the endpoint to its own default.
+        return {}
+    return {
+        "reasoning_effort": "none",
+        "extra_body": {"think": False},
+    }
+
+
 TOOL_SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
@@ -222,6 +260,7 @@ def raw_llm_handler(params: dict[str, Any]) -> dict[str, Any]:
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            **_reasoning_off_kwargs(endpoint),
         )
     except Exception as exc:  # noqa: BLE001
         # A timeout is worth naming: it means the model is alive but slow, so
@@ -239,14 +278,32 @@ def raw_llm_handler(params: dict[str, Any]) -> dict[str, Any]:
         }
 
     choice = response.choices[0] if response.choices else None
-    text = ((choice.message.content if choice else None) or "").strip()
+    message = getattr(choice, "message", None)
+    text = (getattr(message, "content", None) or "").strip()
 
     if not text:
+        # A thinking model that ran out of budget mid-thought answers with an
+        # empty `content` and its whole reply sitting in `reasoning`. That is
+        # a budget problem with a known fix, not the blank reply it looks
+        # like, so it is worth telling apart.
+        finish_reason = getattr(choice, "finish_reason", None)
+        reasoning = getattr(message, "reasoning", None) or getattr(
+            message, "reasoning_content", None
+        )
+        if reasoning and finish_reason == "length":
+            error = (
+                f"model spent the whole {max_tokens}-token budget reasoning "
+                "and never started its answer -- raise max_tokens, or set "
+                "HERMES_REASONING_ENABLED=false to turn thinking off"
+            )
+        else:
+            error = "model returned an empty reply"
         return {
             "success": False,
-            "error": "model returned an empty reply",
+            "error": error,
             "model": model,
-            "finish_reason": getattr(choice, "finish_reason", None),
+            "finish_reason": finish_reason,
+            "reasoning_chars": len(reasoning) if reasoning else 0,
         }
 
     return {

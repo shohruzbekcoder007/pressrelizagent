@@ -128,6 +128,22 @@ floor. Without it Ollama truncates every reply at its internal
 
 `num_predict=128` default.
 
+**Reasoning models.** A thinking model (Qwen3, DeepSeek-R1, …) served over an
+OpenAI-compatible endpoint puts its thoughts in a separate `reasoning` field
+and leaves `content` empty until it stops thinking. If the token budget runs
+out mid-thought the reply comes back genuinely blank. Keep
+`HERMES_REASONING_ENABLED=false`: Hermes then sends `reasoning_effort="none"`
+plus `think=false`, and `raw_llm` sends the same pair on any local profile.
+Verify a new endpoint honours it before trusting it — some builds ignore one
+flag or the other:
+
+```bash
+curl -s $OLLAMA_BASE_URL/chat/completions -H 'Content-Type: application/json'   -d '{"model":"'"$OLLAMA_MODEL"'","messages":[{"role":"user","content":"Reply with exactly: OK"}],
+       "max_tokens":128,"reasoning_effort":"none","think":false}'
+```
+
+A `"reasoning": null` in the response means thinking is really off.
+
 
 
 `HERMES_INFERENCE_PROVIDER` follows `LLM_PROVIDER` automatically; set it only

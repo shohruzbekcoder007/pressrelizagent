@@ -457,6 +457,7 @@ class HermesHostService:
             }
             if self.base_url:
                 llm_kwargs["base_url"] = self.base_url
+            llm_kwargs.update(self._reasoning_off_kwargs())
             llm = ChatOpenAI(**llm_kwargs)
             tools = self._host_langchain_tools()
             self._lite_graph = create_react_agent(
@@ -478,6 +479,7 @@ class HermesHostService:
                 }
                 if self.base_url:
                     llm_kwargs["base_url"] = self.base_url
+                llm_kwargs.update(self._reasoning_off_kwargs())
                 llm = ChatOpenAI(**llm_kwargs)
                 self._lite_graph = create_react_agent(
                     llm, self._host_langchain_tools()
@@ -610,6 +612,45 @@ class HermesHostService:
                 "session_id": session_id,
             }
 
+    def _reasoning_off_kwargs(self) -> dict[str, Any]:
+        """
+        ChatOpenAI kwargs that stop a thinking model from thinking, or `{}`.
+
+        The main agent gets these from its Hermes provider profile. The paths
+        that build a bare `ChatOpenAI` on the same endpoint -- the task model
+        and hermes_lite -- get nothing, so against a reasoning model a
+        three-word title prompt burns hundreds of tokens thinking first. Worse,
+        a reply whose budget runs out mid-thought arrives with empty `content`,
+        which `_chat_task` reads as failure and quietly drops back onto the
+        main agent.
+
+        Two flags because no single one covers every local server: Ollama's
+        /v1 route honours `reasoning_effort` but ignores `think`, and some vLLM
+        builds are the other way round. Endpoints that recognize neither ignore
+        both.
+
+        Never sent on OpenAI, whose gpt-4.1 rejects `reasoning_effort`
+        outright -- `_hermes_provider` is set only on the local profiles and is
+        exactly that marker. Enabled reasoning sends nothing either: thinking
+        is server-default-on for these backends, so forcing it back on risks a
+        400 for no gain.
+        """
+        if not self._hermes_provider:
+            return {}
+        if _env_bool("HERMES_REASONING_ENABLED", False):
+            return {}
+        from langchain_openai import ChatOpenAI
+
+        # Both are real ChatOpenAI fields as of langchain-openai 1.6, but the
+        # floor in requirements.txt is far older -- passing a field that
+        # version lacks raises rather than degrading.
+        supported = getattr(ChatOpenAI, "model_fields", None) or {}
+        candidates: dict[str, Any] = {
+            "reasoning_effort": "none",
+            "extra_body": {"think": False},
+        }
+        return {k: v for k, v in candidates.items() if k in supported}
+
     def _task_llm(self) -> Any:
         """Lazily built client for the task model — same endpoint, small model."""
         if self._task_llm_obj is None:
@@ -622,6 +663,7 @@ class HermesHostService:
             }
             if self.base_url:
                 kwargs["base_url"] = self.base_url
+            kwargs.update(self._reasoning_off_kwargs())
             self._task_llm_obj = ChatOpenAI(**kwargs)
         return self._task_llm_obj
 
