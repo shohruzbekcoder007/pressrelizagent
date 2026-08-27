@@ -273,9 +273,14 @@ tool description:
   row and crowded real indicators out of a five-row shortlist. An explicit code
   lookup still returns a heading — asked what `1.01.01` is, the tool should say
   so — and `daraja` in the reply is what tells the two apart.
-- The search is keyword-based, so it cannot expand abbreviations (`YaIM` finds
-  nothing) and Uzbek case endings are not stemmed (`mahsulotning` does not match
-  `mahsulot`). The agent normalizes the name before searching. Numbers are
+- The search is keyword-based. Four abbreviations the register spells out
+  (`YaIM`, `YaHM`, `YaQQ`, `INI`) are expanded automatically — `YaIM` otherwise
+  matches only rows named "…YAIMdagi ulushi" and never GDP itself, which sent
+  the agent answering confidently about the wrong indicator. `AKT`, `MDH`,
+  `QQS`, `TIF`, `XSST`, `FOB` and `CIF` are left alone: they appear verbatim in
+  indicator names, so they already match. Uzbek case endings are not stemmed
+  (`mahsulotning` does not match `mahsulot`), so the agent still normalizes the
+  name before searching. Numbers are
   stripped from the query automatically, because a year quoted from a press
   release otherwise drags the shortlist onto the rows whose *names* contain
   years.

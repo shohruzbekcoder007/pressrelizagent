@@ -72,6 +72,41 @@ def _strip_figures(text: str) -> str:
     return " ".join(kept) if kept else text
 
 
+# Abbreviations the register spells out. Each one was checked against the data
+# rather than guessed: `YaIM` appears in the register only inside names like
+# "norasmiy iqtisodiyotni YAIMdagi ulushi", so searching it finds the share-of-
+# GDP rows and never GDP itself -- the model then answers confidently about the
+# wrong indicator. AKT, MDH, QQS, TIF, XSST, FOB and CIF are deliberately absent:
+# those appear verbatim in indicator names, so they already match.
+#
+# The expansion is appended, not substituted. Lucene ORs the terms and scores by
+# how many match, so a row carrying both the abbreviation and the spelled-out
+# words still wins -- which keeps `YaIMdagi ulushi` findable for the caller who
+# actually wanted it.
+_ABBREVIATIONS = {
+    "yaim": "Yalpi ichki mahsulot",
+    "yahm": "Yalpi ichki hududiy mahsulot",
+    "yaqq": "yalpi qo'shilgan qiymat",
+    "ini": "Iste'mol narxlari indeksi",
+}
+
+# The register writes the apostrophe four ways; a caller writes a fifth.
+_APOSTROPHES = "‘’ʻʼ`´′"
+
+
+def _expand_abbreviations(text: str) -> str:
+    """Append the spelled-out form of any abbreviation the register omits."""
+    extra: list[str] = []
+    for word in text.split():
+        key = word.strip("().,;:").translate(
+            {ord(c): "'" for c in _APOSTROPHES}
+        ).replace("'", "").lower()
+        expansion = _ABBREVIATIONS.get(key)
+        if expansion and expansion.lower() not in text.lower():
+            extra.append(expansion)
+    return " ".join([text, *extra]) if extra else text
+
+
 # `id` is the register's own key, wanted by callers that go on to query the
 # graph directly. `name_uz` is the authoritative label -- `name` on these nodes
 # is the English translation, which is not what a press release quotes.
@@ -134,7 +169,7 @@ def _search(session: Any, name: str, limit: int) -> list[dict[str, Any]]:
     # name a row matches, which is exactly the behaviour wanted here. The
     # standard analyzer splits on the apostrophe too, so the four spellings of
     # o'/o‘/oʻ/oʼ in this register all reduce to the same tokens.
-    query = _lucene_escape(_strip_figures(name.strip()))
+    query = _lucene_escape(_expand_abbreviations(_strip_figures(name.strip())))
     if not query:
         return []
     result = session.run(_SEARCH_CYPHER, q=query, limit=limit)
