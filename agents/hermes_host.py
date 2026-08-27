@@ -178,7 +178,7 @@ def _is_task_prompt(message: str) -> bool:
 # Hermes does not put every tool in front of the model. Past a certain count it
 # defers them behind a gateway: the model calls `tool_call` (or `tool_describe`)
 # and passes the real tool's name as an argument. Reporting the gateway name
-# would say `tool_call` ran when `raw_llm` did.
+# would say `tool_call` ran when `statind_code` did.
 _GATEWAY_TOOLS = {"tool_call", "tool_describe"}
 
 
@@ -239,7 +239,7 @@ def resolve_llm_endpoint() -> dict[str, Any]:
     Model, endpoint and key for the provider `LLM_PROVIDER` selects.
 
     Public because tools need the same LLM the host agent runs on without
-    going through the agent loop -- see `plugins/pressreliz/raw_llm.py`. One
+    going through the agent loop -- see `plugins/pressreliz/_llm.py`. One
     resolver means a tool can never end up pointed at a different endpoint
     than the agent that called it.
     """
@@ -502,8 +502,8 @@ class HermesHostService:
         reporting none: on `hermes` the tools come from Hermes' own registry
         via the enabled toolsets, and the LangChain list is never consulted --
         `AIAgent` has no parameter for injecting Python tools. Reading it there
-        advertised `echo`, which the agent could not call, and hid `raw_llm`,
-        which it could.
+        advertised `echo`, which the agent could not call, and hid the
+        `pressreliz` tools, which it could.
         """
         if self._backend == "hermes":
             try:

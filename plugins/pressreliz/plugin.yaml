@@ -1,10 +1,11 @@
 name: pressreliz
-version: "0.1.0"
+version: "0.3.0"
 description: >
-  PressRelizAgent tools. Registers the `pressreliz` toolset. `raw_llm` sends a
-  prompt straight to the configured model with no agent system prompt, no
-  conversation history, no memory and no tools.
+  PressRelizAgent tools. Registers the `pressreliz` toolset. `statind_code`
+  maps a plain-language statistical indicator name to its official classifier
+  code, searching the Neo4j indicator register and verifying every code the
+  model returns.
 author: PressRelizAgent
 kind: standalone
 provides_tools:
-  - raw_llm
+  - statind_code

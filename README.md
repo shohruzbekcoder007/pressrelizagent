@@ -133,7 +133,9 @@ OpenAI-compatible endpoint puts its thoughts in a separate `reasoning` field
 and leaves `content` empty until it stops thinking. If the token budget runs
 out mid-thought the reply comes back genuinely blank. Keep
 `HERMES_REASONING_ENABLED=false`: Hermes then sends `reasoning_effort="none"`
-plus `think=false`, and `raw_llm` sends the same pair on any local profile.
+plus `think=false`, and the `pressreliz` tools send the same pair on any
+
+local profile.
 Verify a new endpoint honours it before trusting it — some builds ignore one
 flag or the other:
 
@@ -210,6 +212,8 @@ reaches outside the container:
 
 | `todo` | `todo` | plan multi-step work |
 
+| `pressreliz` | `statind_code` | this repo's own tool — see below |
+
 
 
 Everything Hermes learns lives under `HERMES_HOME` — `memories/`, `skills/`,
@@ -229,6 +233,45 @@ agent act inside the container. Set `API_BEARER_TOKEN` before enabling any of
 them — `/v1/chat` is unauthenticated while it is unset.
 
 
+
+### The `pressreliz` toolset
+
+This repo's own toolset, registered by `plugins/pressreliz/`. Its tools reach
+the model through `_llm.py`, which resolves the endpoint with
+`resolve_llm_endpoint()` — the same one the host agent runs on, so a tool can
+never end up on a different provider than the agent that called it. Adding a
+tool is one entry in `_TOOLS` in `__init__.py`.
+
+**`statind_code`** maps a plain-language indicator name to its official code in
+the Uzbek statistical classifier, in three steps:
+
+1. **Retrieve** — Neo4j's `indicator_fulltext` index returns candidate rows.
+   Uzbek latin, Uzbek cyrillic and Russian names are all indexed, so a Russian
+   query finds the Uzbek row. The standard analyzer splits on the apostrophe,
+   so the register's four spellings of `o'`/`o‘`/`oʻ`/`oʼ` all match.
+2. **Choose** — the app's LLM picks among those candidates, which is what
+   handles wording no keyword search matches.
+3. **Verify** — every returned code is checked against the candidates actually
+   offered. A code the model never received is reported as invented rather
+   than passed on, and a mistyped name is corrected from the register.
+
+That third step is the point: classifier codes are regular enough
+(`1.01.01.0001`) that a model will invent a plausible one, and a wrong code in
+a press release is a published error.
+
+Retrieval rather than a prompt-stuffed register is a measured choice. The flat
+classifier is 146,710 tokens — 56% of this model's 262k context, ~52s on a cold
+cache — against a few hundred tokens for the shortlist. A lookup of four
+indicators takes roughly 8s end to end.
+
+Periodicity (`yillik` / `oylik` / `choraklik`) and cross-sections
+(`hududlar kesimida`, …) are **separate indicators with separate codes**. When
+the caller does not say which, the reply lists the variants instead of guessing
+— the register also holds genuine duplicates (two rows are both
+`Eksport hajmi (oylik)`), and those surface the same way.
+
+`statind_code` needs Neo4j running; when the register is unreachable it says
+so and stops, rather than falling back to a guess.
 
 ## Neo4j
 
@@ -506,8 +549,10 @@ All via environment (`.env`, see `.env.example`).
 | `HERMES_ENABLED_TOOLSETS` | `memory,session_search,skills,todo` | comma-separated Hermes toolsets |
 
 | `HERMES_MAX_ITERATIONS` | `12` | tool-loop cap |
-| `RAW_LLM_TIMEOUT_SECONDS` | `120` | `raw_llm` request timeout |
-| `RAW_LLM_MAX_RETRIES` | `1` | SDK default of 2 triples a real stall |
+| `PRESSRELIZ_LLM_TIMEOUT_SECONDS` | `120` | request timeout for `pressreliz` tool LLM calls |
+
+| `STATIND_MAX_TOKENS` | per-request | `statind_code` reply cap; scales with the number of indicators |
+| `PRESSRELIZ_LLM_MAX_RETRIES` | `1` | SDK default of 2 triples a real stall |
 
 | `HERMES_SESSION_HISTORY_LIMIT` | `6` | turns kept per session |
 
