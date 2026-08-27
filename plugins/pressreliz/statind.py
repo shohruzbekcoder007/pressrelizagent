@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
 from typing import Any
+
+from ._neo4j import CODE_RE as _CODE_RE, session as _session
 
 logger = logging.getLogger("hermes.plugin.pressreliz.statind")
 
@@ -41,48 +42,9 @@ _MAX_INDICATORS = 20
 _DEFAULT_CANDIDATES = 5
 _MAX_CANDIDATES = 25
 
-_driver_lock = threading.Lock()
-_driver: Any = None
-_driver_key: tuple[str, str, str] | None = None
-
-# Classifier codes are dotted numeric groups: `1.01`, `1.01.01`, `1.01.01.0001`.
-# A caller who already has one wants that exact row, not a search.
-_CODE_RE = re.compile(r"^\d{1,2}(?:\.\d{2}){1,2}(?:\.\d{4})?$")
-
 # Lucene reserved characters. Indicator names are full of parentheses and
 # hyphens, so an unescaped name is a query syntax error rather than a search.
 _LUCENE_SPECIAL = set('+-&|!(){}[]^"~*?:\\/')
-
-
-def _neo4j_driver() -> Any:
-    """One driver for the process, rebuilt only if the target moves."""
-    global _driver, _driver_key
-    import os
-
-    uri = os.getenv("NEO4J_URI") or "bolt://neo4j:7687"
-    user = os.getenv("NEO4J_USER") or "neo4j"
-    password = os.getenv("NEO4J_PASSWORD") or ""
-    key = (uri, user, password)
-    with _driver_lock:
-        if _driver is not None and _driver_key == key:
-            return _driver
-        from neo4j import GraphDatabase
-
-        if _driver is not None:
-            try:
-                _driver.close()
-            except Exception:  # noqa: BLE001
-                pass
-        _driver = GraphDatabase.driver(uri, auth=(user, password))
-        _driver_key = key
-        logger.info("statind: neo4j driver built uri=%s", uri)
-        return _driver
-
-
-def _database() -> str:
-    import os
-
-    return os.getenv("NEO4J_DATABASE") or "neo4j"
 
 
 def _lucene_escape(text: str) -> str:
@@ -122,13 +84,24 @@ _RETURN = """
     node.period  AS period
 """
 
+# The index is defined on `StatisticalIndicators`, so it cannot return any
+# other label. The level filter is the one that matters: the register's 3326
+# rows include 96 classifier headings (levels 1-3, e.g. `1.00.00 Iqtisodiy
+# statistika`) which are not measurable indicators, carry no `period`, and have
+# no published data file -- `sdmx_data_<id>.json` 404s for them. They score
+# like any other row, so without this they crowd real indicators out of a
+# five-row shortlist and lead the caller to a dead link.
 _SEARCH_CYPHER = f"""
 CALL db.index.fulltext.queryNodes('indicator_fulltext', $q) YIELD node, score
+WHERE node.level = 4
 RETURN {_RETURN}, score
 ORDER BY score DESC
 LIMIT $limit
 """
 
+# Deliberately not level-filtered: asked what a specific code is, the tool
+# should say so even when it turns out to be a heading -- `daraja` in the reply
+# is what tells the caller which it got.
 _BY_CODE_CYPHER = f"""
 MATCH (node:StatisticalIndicators {{code: $code}})
 RETURN {_RETURN}, 1.0 AS score
@@ -256,8 +229,7 @@ def statind_code_handler(params: dict[str, Any]) -> dict[str, Any]:
     limit = max(1, min(limit, _MAX_CANDIDATES))
 
     try:
-        driver = _neo4j_driver()
-        with driver.session(database=_database()) as session:
+        with _session() as session:
             results = [
                 {"soralgan": name, "nomzodlar": _search(session, name, limit)}
                 for name in names

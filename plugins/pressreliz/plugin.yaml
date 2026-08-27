@@ -1,11 +1,15 @@
 name: pressreliz
-version: "0.3.0"
+version: "0.5.0"
 description: >
-  PressRelizAgent tools. Registers the `pressreliz` toolset. `statind_code`
-  maps a plain-language statistical indicator name to its official classifier
-  code, searching the Neo4j indicator register and verifying every code the
-  model returns.
+  PressRelizAgent tools over the Neo4j statistical register. `statind_code`
+  searches the indicator register and returns the closest matching rows for the
+  agent to choose from. `statind_data` reads the officially published values so
+  a figure in a press release can be checked against the source.
+  `statind_data_url` turns a register id into that indicator's SDMX data-file
+  URL, for citing the source.
 author: PressRelizAgent
 kind: standalone
 provides_tools:
   - statind_code
+  - statind_data
+  - statind_data_url

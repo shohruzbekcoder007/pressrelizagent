@@ -13,7 +13,9 @@ Loading requires three things to line up:
   * `pressreliz` listed in HERMES_ENABLED_TOOLSETS
 
 Tools:
-  * `statind_code` — plain-language indicator name -> statistical classifier code
+  * `statind_code`     — indicator name -> the register's closest matching rows
+  * `statind_data`     — code or id -> the officially published values
+  * `statind_data_url` — register id -> that indicator's SDMX data file URL
 
 The list is deliberately a list: adding a tool is one entry in `_TOOLS`, and a
 tool that fails to import is logged and skipped rather than taking the whole
@@ -33,6 +35,8 @@ TOOLSET_NAME = "pressreliz"
 # (module, schema attribute, handler attribute, emoji)
 _TOOLS = [
     ("statind", "TOOL_SCHEMA", "statind_code_handler", "🔢"),
+    ("data", "TOOL_SCHEMA", "statind_data_handler", "📈"),
+    ("sdmx", "TOOL_SCHEMA", "statind_data_url_handler", "🔗"),
 ]
 
 

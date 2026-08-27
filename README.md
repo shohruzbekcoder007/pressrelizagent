@@ -212,7 +212,7 @@ reaches outside the container:
 
 | `todo` | `todo` | plan multi-step work |
 
-| `pressreliz` | `statind_code` | this repo's own tool — see below |
+| `pressreliz` | `statind_code`, `statind_data`, `statind_data_url` | this repo's own tools — see below |
 
 
 
@@ -267,6 +267,12 @@ tool description:
   the same indicator can appear in more than one section — compare `yol` before
   choosing. The register also holds genuine duplicates (two rows are both
   `Eksport hajmi (oylik)`).
+- The register's 3326 rows include 96 classifier **headings** (levels 1-3, e.g.
+  `1.00.00 Iqtisodiy statistika`) which are not measurable indicators. The
+  search returns only leaf rows (`level = 4`); headings scored like any other
+  row and crowded real indicators out of a five-row shortlist. An explicit code
+  lookup still returns a heading — asked what `1.01.01` is, the tool should say
+  so — and `daraja` in the reply is what tells the two apart.
 - The search is keyword-based, so it cannot expand abbreviations (`YaIM` finds
   nothing) and Uzbek case endings are not stemmed (`mahsulotning` does not match
   `mahsulot`). The agent normalizes the name before searching. Numbers are
@@ -276,6 +282,56 @@ tool description:
 
 `statind_code` needs Neo4j running; when the register is unreachable it says
 so and stops, rather than falling back to a guess.
+
+**`statind_data`** reads the officially published values. The graph holds 2.2M
+`Observation` nodes — one measured value per indicator × period × area ×
+classifier category, with the unit attached — so a figure quoted in a press
+release is checked against the source without leaving Neo4j. Identify an
+indicator by code or id; the default is the five most recent periods, newest
+first, or pass `periods` for specific ones (`2024`, `2025-Q2`, `2024-M03`).
+
+Two properties of the data drive the interface:
+
+- **Volume.** Observations per indicator run from 4 to 19,890 (median 180), so
+  every reply is capped and says when it was truncated.
+- **Shape.** Indicators are cut differently — some by area (regions,
+  countries), some by classifier category (continents, product groups), some by
+  neither — so `hudud` and `kategoriya` are filled in only where they apply.
+
+Growth rates are published as an index: `106.7` means 6.7% growth. 3179 of the
+register's 3326 rows have a series; the other 147 come back as empty
+`qatorlar` with a note, which is an answer rather than a failure.
+
+**`statind_data_url`** turns a register `id` into the indicator's published
+SDMX data file:
+
+```
+https://siat.stat.uz/media/uploads/sdmx/sdmx_data_<id>.json
+```
+
+Behind each link is that indicator's whole published series — a `metadata`
+block (first publication, last modified, dataset id, unit, source, each in
+uz/ru/en/uzc) and a `data` block of rows keyed by classifier value with one
+column per year. The tool builds links and does not fetch them: a tool that
+silently pulls a few hundred KB of time series into a conversation is worse
+than one that hands over a URL.
+
+Every id is checked against the register first, and the reply repeats the code
+and official name. An id naming a heading rather than an indicator is rejected
+too: headings have no published series, and `sdmx_data_<id>.json` 404s for every
+one of them. The two failures are reported separately — `reyestrda_yoq` for an
+id that does not exist, `malumot_fayli_yoq` for a heading — because the fix
+differs: one was invented, the other is a real row whose child indicator the
+caller wanted. That check is not ceremony — a URL looks equally plausible
+whether or not the id behind it exists, so an invented id becomes a dead link
+that reads like a citation. Measured: a real id returns HTTP 200, and
+`sdmx_data_999999.json` returns 404, which the register check catches before
+the agent can quote it. If Neo4j is down the URLs are still returned, marked
+unverified.
+
+`statind_code` → pick a row → `statind_data_url` is the intended chain, and the
+agent walks it on its own: asked for two indicators' data files it called
+`statind_code` once for both names, then `statind_data_url` with the two ids.
 
 ## Neo4j
 
