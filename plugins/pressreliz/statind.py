@@ -1,33 +1,23 @@
 """
-`statind_code` — maps a plain-language indicator name to its classifier code.
+`statind_code` — the nearest rows of the Uzbek statistical indicator register.
 
-The classifier is the Uzbek statistical indicator register: 3326 rows of
-`code | name | level`. Matching a name to a code by hand is tedious and matching
-it by model alone is unsafe -- the codes look regular enough (`1.01.01.0001`)
-that a model will happily invent a plausible one. So this tool does three
-things in order:
+The register is 3326 rows of `id | code | name | level | period`, held in Neo4j
+with a fulltext index over Uzbek latin, Uzbek cyrillic and Russian names plus
+the classifier path. This tool searches it and hands back the closest matches.
+It does **not** decide which one is right: the caller sees the candidates and
+picks, because the caller has the surrounding conversation and this tool does
+not.
 
-  1. **Retrieve** candidates from Neo4j, which already holds the whole register
-     with a fulltext index over Uzbek latin, Uzbek cyrillic and Russian names
-     plus the classifier path.
-  2. **Choose** among those candidates with the app's own LLM, which handles
-     word order, inflection and which periodicity the caller meant.
-
-     It cannot rescue what retrieval missed, though: the model only ever sees
-     the shortlist. An abbreviation is the clear case -- "YaIM" matches only
-     the rows whose *names* contain "YAIMdagi ulushi", never the GDP rows
-     themselves, so the answer is a correct-but-unhelpful TOPILMADI. Expanding
-     the abbreviation before calling is the caller's job, and the tool
-     description says so.
-  3. **Verify** every returned code against the candidates that were actually
-     offered. A code the model did not receive is reported as a hallucination
-     rather than passed on, and a code whose name does not match its row is
-     flagged.
+That division matters for correctness, not just tidiness. Classifier codes are
+regular enough (`1.01.01.0001`) that a language model will invent a plausible
+one; every code leaving this tool was read out of the register a moment
+earlier, so there is nothing here to invent. Passing a code back in (see
+`indicators`) looks it up exactly, which is how a code quoted from elsewhere
+gets checked.
 
 Retrieval rather than a prompt-stuffed register is a measured choice: the flat
-`statind_pipe.txt` is 146,710 tokens, which costs ~52s on a cold cache and
-occupies over half the model's 262k context on every call. The Neo4j shortlist
-carries the same candidates in a few hundred tokens.
+classifier file is 146,710 tokens, ~52s on a cold cache and over half the
+model's 262k context on every call. A five-row shortlist is a few hundred.
 
 This file is bind-mounted into the container (`./plugins:/app/plugins:ro`), so
 editing it needs a container restart, not a rebuild.
@@ -35,36 +25,28 @@ editing it needs a container restart, not a rebuild.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import threading
 from typing import Any
-
-from ._llm import complete, endpoint, env_int
 
 logger = logging.getLogger("hermes.plugin.pressreliz.statind")
 
 TOOL_NAME = "statind_code"
 TOOLSET_NAME = "pressreliz"
 
-# One Neo4j lookup per requested name, so a long list multiplies both the
-# retrieval and the prompt. Twenty is well inside a comfortable prompt and far
-# past what a press release cites at once.
+# One Neo4j lookup per requested name, so a long list multiplies the work.
+# Twenty is far past what a press release cites at once.
 _MAX_INDICATORS = 20
-_DEFAULT_CANDIDATES = 10
+_DEFAULT_CANDIDATES = 5
 _MAX_CANDIDATES = 25
-
-# The register is a closed set, so a name that matches nothing at all is a real
-# answer ("TOPILMADI"), not an error.
-_NOT_FOUND = "TOPILMADI"
 
 _driver_lock = threading.Lock()
 _driver: Any = None
 _driver_key: tuple[str, str, str] | None = None
 
 # Classifier codes are dotted numeric groups: `1.01`, `1.01.01`, `1.01.01.0001`.
-# A caller who already has one wants verification, not search.
+# A caller who already has one wants that exact row, not a search.
 _CODE_RE = re.compile(r"^\d{1,2}(?:\.\d{2}){1,2}(?:\.\d{4})?$")
 
 # Lucene reserved characters. Indicator names are full of parentheses and
@@ -116,8 +98,8 @@ def _strip_figures(text: str) -> str:
     ... 8,5 foizga oshdi". Those score against the register just like the real
     words do, and the register contains rows whose *names* carry years
     ("Chakana savdo hajmi (2023-2024yy, oylik)"), so the year in the sentence
-    pulls the entire shortlist onto the 2023-2024 rows and the right row never
-    reaches the model.
+    pulls the whole shortlist onto the 2023-2024 rows and the right row never
+    surfaces.
 
     Only *leading* digits qualify. Codes like `XSST-2008` and `MIIT-2018` are
     part of an indicator's identity and start with a letter, so they survive;
@@ -128,15 +110,16 @@ def _strip_figures(text: str) -> str:
     return " ".join(kept) if kept else text
 
 
-# Returned for every hit. `name_uz` is the authoritative label -- `name` on
-# these nodes is the English translation, which is not what a press release
-# quotes.
+# `id` is the register's own key, wanted by callers that go on to query the
+# graph directly. `name_uz` is the authoritative label -- `name` on these nodes
+# is the English translation, which is not what a press release quotes.
 _RETURN = """
-    node.code   AS code,
+    node.id      AS id,
+    node.code    AS code,
     node.name_uz AS name,
     node.path_uz AS path,
-    node.level  AS level,
-    node.period AS period
+    node.level   AS level,
+    node.period  AS period
 """
 
 _SEARCH_CYPHER = f"""
@@ -154,17 +137,22 @@ LIMIT 1
 
 
 def _row(record: Any) -> dict[str, Any]:
+    score = record["score"]
     return {
+        "id": record["id"],
         "kod": record["code"],
         "nomi": record["name"],
         "yol": record["path"],
         "daraja": record["level"],
         "davriylik": record["period"],
+        # Lucene's raw score. Meaningless on its own, useful only for comparing
+        # the rows of one search against each other.
+        "moslik": round(float(score), 2) if score is not None else None,
     }
 
 
 def _search(session: Any, name: str, limit: int) -> list[dict[str, Any]]:
-    """Candidates for one requested name, best first."""
+    """The closest register rows for one requested name, best first."""
     if _CODE_RE.match(name.strip()):
         result = session.run(_BY_CODE_CYPHER, code=name.strip())
         return [_row(r) for r in result]
@@ -180,121 +168,36 @@ def _search(session: Any, name: str, limit: int) -> list[dict[str, Any]]:
     return [_row(r) for r in result]
 
 
-_SYSTEM = """Sen O'zbekiston Milliy statistika qo'mitasining statistik
-ko'rsatkichlar klassifikatori bo'yicha yordamchisan.
-
-Har bir so'ralgan ko'rsatkich uchun NOMZODLAR ro'yxati berilgan. Ro'yxat
-klassifikatordan qidiruv orqali olingan.
-
-QOIDALAR:
-1. Kodni FAQAT o'sha ko'rsatkichning nomzodlar ro'yxatidan ko'chirib yoz.
-   Hech qachon kod o'ylab topma va yaqin kodni taxmin qilma.
-2. Nomzodlar orasida mos ko'rsatkich bo'lmasa, kod o'rniga "TOPILMADI" yoz.
-3. Davriylikka alohida e'tibor ber: "(yillik)", "(oylik)" va "(choraklik)" —
-   bular BOSHQA-BOSHQA ko'rsatkichlar, kodlari ham har xil. Xuddi shunday
-   "(hududlar kesimida)", "(mamlakatlar kesimida)", "(qit'alar kesimida)" ham
-   alohida ko'rsatkichlar.
-4. Foydalanuvchi davriylikni aytmagan bo'lsa, o'zing tanlama: "kod" ga eng
-   umumiy variantni qo'y, ishonchni "past" deb belgila va barcha mos
-   variantlarni "variantlar" ro'yxatiga chiqar.
-5. Bir nechta mos variant bo'lsa, ishonch "past" yoki "o'rta" bo'ladi.
-
-JAVOB FORMATI — faqat JSON massiv, boshqa hech narsa yozma:
-[
-  {"soralgan": "<so'ralgan matn>",
-   "kod": "<nomzodlar ro'yxatidagi kod yoki TOPILMADI>",
-   "nomi": "<tanlangan nomzodning to'liq nomi>",
-   "ishonch": "yuqori|o'rta|past",
-   "variantlar": [{"kod": "...", "nomi": "..."}],
-   "izoh": "<past yoki o'rta bo'lsa sabab, aks holda bo'sh>"}
-]"""
-
-
-def _build_user_message(batch: list[tuple[str, list[dict[str, Any]]]]) -> str:
-    parts: list[str] = []
-    for i, (name, candidates) in enumerate(batch, 1):
-        parts.append(f'### {i}. So\'ralgan: "{name}"')
-        if not candidates:
-            parts.append("Nomzodlar: (qidiruv hech nima topmadi)")
-        else:
-            parts.append("Nomzodlar:")
-            for c in candidates:
-                extra = f" — yo'l: {c['yol']}" if c.get("yol") else ""
-                parts.append(f"- {c['kod']} | {c['nomi']}{extra}")
-        parts.append("")
-    return "\n".join(parts).strip()
-
-
-def _parse_reply(text: str) -> Any:
-    """The model is asked for bare JSON; fenced JSON is tolerated anyway."""
-    cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
-    try:
-        return json.loads(cleaned)
-    except ValueError:
-        # A stray sentence before or after the array is common enough to be
-        # worth one salvage attempt before giving up.
-        start, end = cleaned.find("["), cleaned.rfind("]")
-        if start != -1 and end > start:
-            return json.loads(cleaned[start : start + (end - start + 1)])
-        raise
-
-
-def _norm(text: Any) -> str:
-    """Compare names ignoring case, spacing and the register's four apostrophes."""
-    s = str(text or "")
-    for ch in "‘’ʻʼ`´′":
-        s = s.replace(ch, "'")
-    return " ".join(s.split()).lower()
-
-
-def _verify(
-    entry: dict[str, Any], offered: dict[str, str]
-) -> tuple[str, dict[str, Any]]:
-    """
-    Classify one answer against the codes actually offered for it.
-
-    `offered` maps code -> authoritative name. Anything outside it was not in
-    front of the model, so it was invented.
-    """
-    code = str(entry.get("kod") or "").strip()
-    if code == _NOT_FOUND or not code:
-        return "topilmadi", entry
-    if code not in offered:
-        return "XATO: bu kod nomzodlar ro'yxatida yo'q (model o'ylab topgan)", entry
-    real = offered[code]
-    if _norm(entry.get("nomi")) != _norm(real):
-        # The code is real but the model retyped the name wrong. The code wins;
-        # the name is corrected from the register so the caller never quotes a
-        # label that does not exist.
-        entry["nomi"] = real
-        return f"OGOHLANTIRISH: nom to'g'rilandi -> {real}", entry
-    return "ok", entry
-
-
 TOOL_SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
-        "Find the official Uzbek statistical classifier code for one or more "
-        "indicators. Searches the indicator register (Uzbek latin, Uzbek "
-        "cyrillic and Russian names are all indexed), picks the best match and "
-        "reports how confident it is. Every returned code is verified against "
-        "the register, so an invented code is reported as an error instead of "
-        "being passed on. Use it whenever a press release or a question "
-        "mentions a statistical indicator and the code is needed.\n"
+        "Search the Uzbek statistical indicator register and return the "
+        f"closest {_DEFAULT_CANDIDATES} rows for each name given, with their "
+        "id, classifier code, official name, classifier path, level and "
+        "periodicity. Uzbek latin, Uzbek cyrillic and Russian names are all "
+        "indexed, so a Russian query finds the Uzbek row.\n"
+        "THIS TOOL DOES NOT CHOOSE. It returns candidates read straight out of "
+        "the register; you decide which one the text meant, and you may decide "
+        "none of them fit. Never quote a code that is not among the rows "
+        "returned -- if none match, say so or search again with different "
+        "wording.\n"
         "PASS THE INDICATOR NAME, NOT THE SENTENCE IT CAME FROM. The search is "
         "keyword-based, so surrounding prose dilutes it: from '2024-yilda "
-        "chakana savdo hajmi 8,5 foizga oshdi' pass 'Chakana savdo hajmining "
-        "o'sish sur'ati (yillik)'. Expand abbreviations yourself -- 'YaIM' "
-        "finds nothing, 'Yalpi ichki mahsulot' finds the right rows. If the "
-        "text says something grew by a percentage, the indicator is usually "
-        "the growth rate (o'sish sur'ati), not the volume (hajmi).\n"
-        "Use dictionary forms. Uzbek case endings are not stemmed, so "
-        "'mahsulotning' does not match the register's 'mahsulot' and drops the "
-        "right row out of the shortlist -- strip the suffix before passing "
-        "the name.\n"
-        "Periodicity (yillik / oylik / choraklik) and cross-sections are "
-        "separate indicators with separate codes: if you do not know which was "
-        "meant, say so rather than guessing -- the reply lists the variants."
+        "chakana savdo hajmi 8,5 foizga oshdi' search 'Chakana savdo hajmi "
+        "o'sish sur'ati'. Expand abbreviations yourself -- 'YaIM' finds "
+        "nothing, 'Yalpi ichki mahsulot' finds the right rows. Use dictionary "
+        "forms: Uzbek case endings are not stemmed, so 'mahsulotning' does not "
+        "match the register's 'mahsulot'. If the text says something grew by a "
+        "percentage, the indicator is usually the growth rate (o'sish sur'ati) "
+        "rather than the volume (hajmi).\n"
+        "Periodicity (yillik / oylik / choraklik) and cross-sections "
+        "(hududlar / mamlakatlar / qit'alar kesimida) are SEPARATE indicators "
+        "with separate codes. The same indicator can also appear in more than "
+        "one section of the register, so compare the `yol` (path) field before "
+        "choosing; if the text does not say which was meant, present the "
+        "alternatives rather than picking one.\n"
+        "Passing a classifier code instead of a name returns that exact row, "
+        "which is how a code quoted from elsewhere gets verified."
     ),
     "parameters": {
         "type": "object",
@@ -303,19 +206,19 @@ TOOL_SCHEMA: dict[str, Any] = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Indicator names, each one a name and nothing else -- not "
-                    "the sentence it was quoted from, and with abbreviations "
-                    "spelled out. A classifier code (e.g. '1.01.01.0001') may "
-                    "be passed instead to verify it. At most "
-                    f"{_MAX_INDICATORS} per call."
+                    "Indicator names to search for, each one a name and "
+                    "nothing else -- not the sentence it was quoted from, and "
+                    "with abbreviations spelled out. A classifier code (e.g. "
+                    "'1.01.01.0001') may be passed instead to look up that "
+                    f"exact row. At most {_MAX_INDICATORS} per call."
                 ),
             },
-            "candidates_per_indicator": {
+            "limit": {
                 "type": "integer",
                 "description": (
-                    "How many register rows to put in front of the model for "
-                    f"each name. Defaults to {_DEFAULT_CANDIDATES}; raise it "
-                    "for a vague name, lower it for a precise one."
+                    f"Rows to return per name. Defaults to "
+                    f"{_DEFAULT_CANDIDATES}, maximum {_MAX_CANDIDATES}. Raise "
+                    "it when the wording is vague or the first search missed."
                 ),
             },
         },
@@ -325,7 +228,7 @@ TOOL_SCHEMA: dict[str, Any] = {
 
 
 def statind_code_handler(params: dict[str, Any]) -> dict[str, Any]:
-    """Look up classifier codes. Returns a dict; the plugin serializes it."""
+    """Search the register. Returns a dict; the plugin serializes it."""
     raw = (params or {}).get("indicators")
     if isinstance(raw, str):
         # A single name passed unwrapped is the likeliest caller mistake and
@@ -347,16 +250,18 @@ def statind_code_handler(params: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-        limit = int(params.get("candidates_per_indicator") or _DEFAULT_CANDIDATES)
+        limit = int(params.get("limit") or _DEFAULT_CANDIDATES)
     except (TypeError, ValueError):
         limit = _DEFAULT_CANDIDATES
     limit = max(1, min(limit, _MAX_CANDIDATES))
 
-    # --- 1. retrieve -----------------------------------------------------
     try:
         driver = _neo4j_driver()
         with driver.session(database=_database()) as session:
-            batch = [(name, _search(session, name, limit)) for name in names]
+            results = [
+                {"soralgan": name, "nomzodlar": _search(session, name, limit)}
+                for name in names
+            ]
     except Exception as exc:  # noqa: BLE001
         logger.warning("statind: neo4j search failed: %s", exc)
         return {
@@ -365,119 +270,20 @@ def statind_code_handler(params: dict[str, Any]) -> dict[str, Any]:
             "retryable": True,
         }
 
-    offered_by_name = {
-        name: {c["kod"]: c["nomi"] for c in cands} for name, cands in batch
-    }
-    if not any(cands for _, cands in batch):
-        return {
-            "success": True,
-            "natijalar": [
-                {
-                    "soralgan": name,
-                    "kod": _NOT_FOUND,
-                    "nomi": "",
-                    "ishonch": "past",
-                    "izoh": "klassifikatordan hech qanday nomzod topilmadi",
-                    "holat": "topilmadi",
-                }
-                for name in names
-            ],
-            "jami": len(names),
-            "tekshiruvdan_otmadi": 0,
-        }
+    for entry in results:
+        entry["topildi"] = len(entry["nomzodlar"])
 
-    # --- 2. choose -------------------------------------------------------
-    # Room for one object per indicator plus the variant lists, which are the
-    # part that grows when a name is ambiguous.
-    max_tokens = env_int("STATIND_MAX_TOKENS", 400 * len(names) + 600)
-    reply = complete(
-        [
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": _build_user_message(batch)},
-        ],
-        ep=endpoint(),
-        max_tokens=max_tokens,
-    )
-    if not reply.get("success"):
-        return {
-            "success": False,
-            "error": reply.get("error"),
-            "timed_out": reply.get("timed_out"),
-            "retryable": reply.get("retryable"),
-        }
-
-    try:
-        parsed = _parse_reply(str(reply.get("text") or ""))
-    except ValueError as exc:
-        return {
-            "success": False,
-            "error": f"model did not return usable JSON: {exc}",
-            "raw": str(reply.get("text") or "")[:500],
-        }
-    if not isinstance(parsed, list):
-        return {
-            "success": False,
-            "error": "model returned JSON that is not an array",
-            "raw": str(reply.get("text") or "")[:500],
-        }
-
-    # --- 3. verify -------------------------------------------------------
-    # Keyed by requested name so a reordered or partial reply still lines up
-    # with the candidates that were offered for it.
-    by_name = {}
-    for entry in parsed:
-        if isinstance(entry, dict):
-            by_name.setdefault(_norm(entry.get("soralgan")), entry)
-
-    results: list[dict[str, Any]] = []
-    for name in names:
-        entry = by_name.get(_norm(name))
-        if entry is None:
-            results.append(
-                {
-                    "soralgan": name,
-                    "kod": _NOT_FOUND,
-                    "nomi": "",
-                    "ishonch": "past",
-                    "izoh": "model bu ko'rsatkich uchun javob qaytarmadi",
-                    "holat": "XATO: javobda yo'q",
-                }
-            )
-            continue
-
-        offered = offered_by_name.get(name, {})
-        holat, entry = _verify(entry, offered)
-        entry["soralgan"] = name
-        entry["holat"] = holat
-
-        variants = entry.get("variantlar")
-        if isinstance(variants, list) and variants:
-            # Variants are quoted onward just like the main pick, so they get
-            # the same treatment: unknown codes dropped, names corrected.
-            kept = []
-            for v in variants:
-                if not isinstance(v, dict):
-                    continue
-                vcode = str(v.get("kod") or "").strip()
-                if vcode in offered:
-                    kept.append({"kod": vcode, "nomi": offered[vcode]})
-            entry["variantlar"] = kept
-        else:
-            entry.pop("variantlar", None)
-
-        results.append(entry)
-
-    failed = sum(1 for r in results if r["holat"] not in ("ok", "topilmadi"))
+    empty = [e["soralgan"] for e in results if not e["nomzodlar"]]
     logger.info(
-        "statind_code: %d requested, %d failed verification (model=%s)",
-        len(results),
-        failed,
-        reply.get("model"),
+        "statind_code: %d searched, %d with no match", len(results), len(empty)
     )
-    return {
+    out: dict[str, Any] = {
         "success": True,
         "natijalar": results,
         "jami": len(results),
-        "tekshiruvdan_otmadi": failed,
-        "model": reply.get("model"),
     }
+    if empty:
+        # Named explicitly so the caller does not have to scan the list to
+        # notice a search that came back empty.
+        out["topilmadi"] = empty
+    return out

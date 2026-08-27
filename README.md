@@ -236,39 +236,43 @@ them — `/v1/chat` is unauthenticated while it is unset.
 
 ### The `pressreliz` toolset
 
-This repo's own toolset, registered by `plugins/pressreliz/`. Its tools reach
-the model through `_llm.py`, which resolves the endpoint with
-`resolve_llm_endpoint()` — the same one the host agent runs on, so a tool can
-never end up on a different provider than the agent that called it. Adding a
-tool is one entry in `_TOOLS` in `__init__.py`.
+This repo's own toolset, registered by `plugins/pressreliz/`. Adding a tool is
+one entry in `_TOOLS` in `__init__.py`.
 
-**`statind_code`** maps a plain-language indicator name to its official code in
-the Uzbek statistical classifier, in three steps:
+**`statind_code`** searches the Uzbek statistical indicator register and returns
+the closest **5 rows** for each name given — `id`, `kod`, `nomi`, `yol` (path),
+`daraja`, `davriylik` and a `moslik` score. Neo4j's `indicator_fulltext` index
+covers Uzbek latin, Uzbek cyrillic and Russian names plus the classifier path,
+so a Russian query finds the Uzbek row; the standard analyzer splits on the
+apostrophe, so the register's four spellings of `o'`/`o‘`/`oʻ`/`oʼ` all match.
 
-1. **Retrieve** — Neo4j's `indicator_fulltext` index returns candidate rows.
-   Uzbek latin, Uzbek cyrillic and Russian names are all indexed, so a Russian
-   query finds the Uzbek row. The standard analyzer splits on the apostrophe,
-   so the register's four spellings of `o'`/`o‘`/`oʻ`/`oʼ` all match.
-2. **Choose** — the app's LLM picks among those candidates, which is what
-   handles wording no keyword search matches.
-3. **Verify** — every returned code is checked against the candidates actually
-   offered. A code the model never received is reported as invented rather
-   than passed on, and a mistyped name is corrected from the register.
-
-That third step is the point: classifier codes are regular enough
-(`1.01.01.0001`) that a model will invent a plausible one, and a wrong code in
-a press release is a published error.
+**The tool does not choose.** It hands the agent candidates and the agent picks,
+because the agent has the conversation and the tool does not. This is also what
+makes an invented code impossible: every code it emits was read out of the
+register a moment earlier. Classifier codes are regular enough (`1.01.01.0001`)
+that a model will happily invent a plausible one, and a wrong code in a press
+release is a published error. Passing a code *in* returns that exact row, which
+is how a code quoted from elsewhere gets verified.
 
 Retrieval rather than a prompt-stuffed register is a measured choice. The flat
 classifier is 146,710 tokens — 56% of this model's 262k context, ~52s on a cold
-cache — against a few hundred tokens for the shortlist. A lookup of four
-indicators takes roughly 8s end to end.
+cache — against a few hundred tokens for a five-row shortlist. A search returns
+in well under a second.
 
-Periodicity (`yillik` / `oylik` / `choraklik`) and cross-sections
-(`hududlar kesimida`, …) are **separate indicators with separate codes**. When
-the caller does not say which, the reply lists the variants instead of guessing
-— the register also holds genuine duplicates (two rows are both
-`Eksport hajmi (oylik)`), and those surface the same way.
+Two properties of the register the caller has to know about, both stated in the
+tool description:
+
+- Periodicity (`yillik` / `oylik` / `choraklik`) and cross-sections
+  (`hududlar kesimida`, …) are **separate indicators with separate codes**, and
+  the same indicator can appear in more than one section — compare `yol` before
+  choosing. The register also holds genuine duplicates (two rows are both
+  `Eksport hajmi (oylik)`).
+- The search is keyword-based, so it cannot expand abbreviations (`YaIM` finds
+  nothing) and Uzbek case endings are not stemmed (`mahsulotning` does not match
+  `mahsulot`). The agent normalizes the name before searching. Numbers are
+  stripped from the query automatically, because a year quoted from a press
+  release otherwise drags the shortlist onto the rows whose *names* contain
+  years.
 
 `statind_code` needs Neo4j running; when the register is unreachable it says
 so and stops, rather than falling back to a guess.
@@ -549,11 +553,6 @@ All via environment (`.env`, see `.env.example`).
 | `HERMES_ENABLED_TOOLSETS` | `memory,session_search,skills,todo` | comma-separated Hermes toolsets |
 
 | `HERMES_MAX_ITERATIONS` | `12` | tool-loop cap |
-| `PRESSRELIZ_LLM_TIMEOUT_SECONDS` | `120` | request timeout for `pressreliz` tool LLM calls |
-
-| `STATIND_MAX_TOKENS` | per-request | `statind_code` reply cap; scales with the number of indicators |
-| `PRESSRELIZ_LLM_MAX_RETRIES` | `1` | SDK default of 2 triples a real stall |
-
 | `HERMES_SESSION_HISTORY_LIMIT` | `6` | turns kept per session |
 
 | `HERMES_SKIP_MEMORY` | `false` | `true` = stateless |
