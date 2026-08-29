@@ -12,6 +12,7 @@ plugins:
   # $HERMES_HOME/plugins but missing here is silently skipped.
   enabled:
     - pressreliz
+    - pdfmd
   disabled: []
 
 tools:

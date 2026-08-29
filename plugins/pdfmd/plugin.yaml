@@ -1,0 +1,13 @@
+name: pdfmd
+version: "0.1.0"
+description: >
+  PDF -> Markdown -> structured claims, for press releases that arrive as a
+  PDF. `pdf_to_md` converts a file dropped into data/pdf and stores the
+  Markdown on disk rather than in the conversation. `pdf_extract` reads that
+  Markdown back and pulls out the checkable claims -- figure, unit, period,
+  indicator name -- which then go to the `pressreliz` tools for verification.
+author: PressRelizAgent
+kind: standalone
+provides_tools:
+  - pdf_to_md
+  - pdf_extract
