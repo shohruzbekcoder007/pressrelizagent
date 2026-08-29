@@ -25,6 +25,7 @@ from typing import Any
 from ._pdf import (
     PdfError,
     convert as _convert,
+    ensure_dirs,
     md_dir,
     md_path_for,
     pdf_dir,
@@ -65,16 +66,18 @@ def _one(name: str, force: bool, preview: int) -> dict[str, Any]:
 
     out = md_path_for(pdf)
     reused = False
+    extra: dict[str, Any] = {}
     if out.is_file() and not force:
-        # Converting again costs seconds and produces the same bytes, so a
-        # second question about the same release should not pay for it. `force`
-        # is there for the case the file on disk was replaced.
+        # Reconversion is the expensive step here -- the layout model runs
+        # minutes on CPU -- and produces the same bytes, so a second question
+        # about the same release should not pay for it. `force` is there for
+        # the case the PDF on disk was replaced.
         body = out.read_text(encoding="utf-8")
         pages, backend = 0, "cache"
         reused = True
     else:
         try:
-            body, pages, backend = _convert(pdf)
+            body, pages, backend, extra = _convert(pdf)
         except PdfError as exc:
             return {"soralgan": name, "fayl": relative(pdf), "xato": str(exc)}
         md_dir().mkdir(parents=True, exist_ok=True)
@@ -93,6 +96,10 @@ def _one(name: str, force: bool, preview: int) -> dict[str, Any]:
     }
     if pages:
         result["sahifa"] = pages
+    if extra.get("seconds") is not None:
+        result["sekund"] = round(float(extra["seconds"]), 1)
+    if extra.get("device"):
+        result["qurilma"] = extra["device"]
     if len(body) > preview:
         result["izoh"] = (
             f"faqat birinchi {preview} belgi ko'rsatildi -- to'liq matn uchun "
@@ -111,15 +118,17 @@ TOOL_SCHEMA: dict[str, Any] = {
         "is written to `data/md/` and is meant to be read by `pdf_extract`, "
         "which pulls out the checkable claims. Do not ask for a larger preview "
         "in order to read the whole release -- call `pdf_extract` instead.\n"
-        "Conversion is mechanical: no model rewrites the text, so a figure in "
-        "the Markdown is the figure printed in the PDF. `backend` names the "
-        "converter that produced it, and `sahifa` the page count. Pages are "
-        "separated by a `---` rule.\n"
-        "A scanned PDF with no text layer cannot be converted and comes back "
-        "as an error asking for OCR; that is an answer, not a fault.\n"
-        "Converting the same file twice reuses the stored Markdown (`holat` "
-        "says which happened). Pass `force` only if the PDF itself was "
-        "replaced."
+        "No language model rewrites the text: a layout model reads the pages, "
+        "so a figure in the Markdown is the figure printed in the PDF and "
+        "tables keep their shape. Scanned releases are read too. `backend` "
+        "names the converter, `sahifa` the page count, `sekund` how long it "
+        "took.\n"
+        "IT CAN TAKE MINUTES. Recognition runs page by page, so a long release "
+        "is slow the first time. Do not call it again because it feels stuck, "
+        "and do not give up on the document -- wait for the reply.\n"
+        "Converting the same file twice reuses the stored Markdown and is "
+        "immediate (`holat` says which happened). Pass `force` only if the PDF "
+        "itself was replaced."
     ),
     "parameters": {
         "type": "object",
@@ -182,6 +191,7 @@ def pdf_to_md_handler(params: dict[str, Any]) -> dict[str, Any]:
     preview = max(0, min(preview, _MAX_PREVIEW))
     force = bool(params.get("force"))
 
+    ensure_dirs()
     results = [_one(name, force, preview) for name in names]
     failed = [r["soralgan"] for r in results if r.get("xato")]
     logger.info(

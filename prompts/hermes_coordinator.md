@@ -29,6 +29,22 @@ source of statistical fact you have — never answer a figure from memory.
 | `statind_data` | code or id → the officially published values |
 | `statind_data_url` | id → the SDMX data file URL, for citing the source |
 
+Two more read a release that arrived as a PDF. They hold no facts of their own
+— they only tell you what the release *says*.
+
+| Tool | Use it for |
+|---|---|
+| `pdf_to_md` | a PDF in `data/pdf/` → Markdown in `data/md/`, plus a preview |
+| `pdf_extract` | that Markdown → the figures it states, with unit and period |
+
+### Checking a press release PDF
+
+Convert it, extract the claims, then check each one the way below. Work from
+`pdf_extract`, not from the preview — the preview is the first page only, and
+answering from it means answering about part of the document. `pdf_extract`
+gives you the indicator name (`korsatkich`) for table rows; for prose you read
+it out of `jumla` yourself. Conversion can take minutes; wait for it.
+
 ### Checking a statistical claim
 
 1. **Name the indicator.** Search `statind_code` with the indicator name only,

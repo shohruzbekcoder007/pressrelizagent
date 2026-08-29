@@ -54,6 +54,13 @@ services:
       HERMES_REASONING_ENABLED: ${HERMES_REASONING_ENABLED:-false}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       HEALTHCHECK_URL: http://127.0.0.1:8080/health
+      # PDF -> Markdown converter (a separate app on the host). Same
+      # host.docker.internal rule as the LLM above: 127.0.0.1 inside this
+      # container is this container, not the machine running the service.
+      PDF_CONVERT_URL: ${PDF_CONVERT_URL:-http://host.docker.internal:7070/convert}
+      # A layout model, page by page -- minutes on CPU for a long release.
+      PDF_CONVERT_TIMEOUT: ${PDF_CONVERT_TIMEOUT:-600}
+      PDF_BACKEND: ${PDF_BACKEND:-auto}
       # Neo4j — reached over the compose network, so the container port (7687)
       # is what matters here, not the published one.
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}

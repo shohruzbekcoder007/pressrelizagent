@@ -16,3 +16,6 @@ langgraph>=0.2.0
 
 # Knowledge graph
 neo4j>=5.26.0,<6.0.0
+
+# Multipart uploads: FastAPI needs this for UploadFile (POST /v1/files)
+python-multipart>=0.0.9,<1.0.0

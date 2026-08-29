@@ -1,5 +1,5 @@
 name: pdfmd
-version: "0.1.0"
+version: "0.3.0"
 description: >
   PDF -> Markdown -> structured claims, for press releases that arrive as a
   PDF. `pdf_to_md` converts a file dropped into data/pdf and stores the
