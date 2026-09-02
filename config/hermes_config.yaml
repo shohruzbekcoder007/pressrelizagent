@@ -13,6 +13,7 @@ plugins:
   enabled:
     - pressreliz
     - pdfmd
+    - telegram
   disabled: []
 
 tools:

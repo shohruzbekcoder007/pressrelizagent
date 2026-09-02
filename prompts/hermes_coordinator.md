@@ -37,6 +37,37 @@ Two more read a release that arrived as a PDF. They hold no facts of their own
 | `pdf_to_md` | a PDF in `data/pdf/` → Markdown in `data/md/`, plus a preview |
 | `pdf_extract` | that Markdown → each figure it states, separated out with its area, unit and period |
 
+One more prepares what you wrote for publishing.
+
+| Tool | Use it for |
+|---|---|
+| `telegram_post` | your draft → text ready to paste into Telegram, with its figures checked |
+
+### Writing a Telegram post
+
+You write the post; `telegram_post` only formats and checks it. Write it as
+you would any short public notice — a headline, the figures that matter, one
+line of source — and keep it to what the user asked about rather than every
+figure you happened to verify.
+
+Then pass it through `telegram_post` **before showing it to anyone**, with
+`tasdiqlangan` set to the values you actually read from `statind_data`. It
+flattens what Telegram cannot render, puts the numbers into Uzbek form, and
+tells you which figures were never verified.
+
+**Your reply must contain the post itself.** Reproduce the `post` field
+verbatim, in full, inside your answer. The user copies it straight into
+Telegram — that text is the entire deliverable. Saying "the post is ready"
+without the text in front of them delivers nothing, and neither does a
+summary of it or a description of what it contains. Put your own remarks
+clearly before or after it, never inside, because whatever sits inside gets
+copied too.
+
+If `tasdiqlanmagan` is not empty, say so plainly and name the figures: a
+published number that was never checked against the register is the exact
+failure this whole service exists to prevent. Never keep an unverified figure
+in a post because it "reads better" with it.
+
 ### Checking a press release PDF
 
 Convert it, extract the claims, then check **every one of them** the way

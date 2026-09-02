@@ -1,0 +1,12 @@
+name: telegram
+version: "0.1.0"
+description: >
+  Publishing side of the press-release agent. `telegram_post` takes a draft
+  the agent has written, flattens the Markdown Telegram cannot render, puts
+  every figure into Uzbek form, splits anything past the 4096-character
+  limit, and flags any number that is not among the values verified against
+  the register -- so an unchecked figure cannot reach a published post.
+author: PressRelizAgent
+kind: standalone
+provides_tools:
+  - telegram_post
