@@ -199,10 +199,19 @@ _LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _RULE = re.compile(r"^\s*([-*_=])\1{2,}\s*$")
 _BULLET = re.compile(r"^\s*[-*+]\s+")
 _TABLE_SEP = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
+# `7,7%%` -- a real post came back with this twice. Nothing here produces it,
+# so it arrives in the draft: models reach for the printf escape when they
+# mean a literal percent. It has no meaning in Uzbek statistical prose, and a
+# doubled sign is exactly the kind of visible blemish this tool exists to
+# take out before anyone copies the text.
+_DOUBLE_PERCENT = re.compile(r"%{2,}")
 
 
 def _cells(line: str) -> list[str]:
-    return [c.strip() for c in line.strip().strip("|").split("|")]
+    return [
+        _DOUBLE_PERCENT.sub("%", c.strip())
+        for c in line.strip().strip("|").split("|")
+    ]
 
 
 def _table_to_lines(header: list[str], rows: list[list[str]]) -> list[str]:
@@ -266,6 +275,7 @@ def _flatten(text: str) -> str:
         line = _CODE.sub(r"\1", line)
         line = _BOLD_ITALIC.sub(r"\2", line)
         line = _BULLET.sub("• ", line)
+        line = _DOUBLE_PERCENT.sub("%", line)
         lines_out.append(line)
 
     flush_table()
