@@ -4,15 +4,26 @@
 The unit this tool deals in is a **claim**: one statement in the release that
 can be true or false against the register.
 
-    {"jumla":  "2025-yilda yalpi ichki mahsulot 1 849 650,0 mlrd so'mni tashkil etdi",
-     "raqam":  1849650.0,
-     "birlik": "mlrd so'mni",
-     "davr":   "2025"}
+    {"jumla":  "2025-yilda Andijon viloyatida eksport 1 849,0 mln AQSH dollarini tashkil etdi",
+     "raqam":  1849.0,
+     "birlik": "mln AQSH dollarini",
+     "davr":   "2025",
+     "manzil": "Andijon viloyati"}
 
-That shape exists because of what comes after it: `davr` becomes `periods` for
-`statind_data`, and `raqam` with `birlik` is what the published value gets
-compared against. The indicator name is read off `jumla` by the caller and
-taken to `statind_code`.
+That shape exists because of what comes after it: `davr` becomes `periods` and
+`manzil` becomes `hudud` for `statind_data`, and `raqam` with `birlik` is what
+the published value gets compared against. The indicator name is read off
+`jumla` by the caller and taken to `statind_code`.
+
+`manzil` matters because most indicators in this register are cut by area --
+`statind_data` returns one row per region for a national indicator, and a
+claim about Andijon has to be checked against Andijon's row, not the republic
+total sitting a few rows above it. It is filled in only for Uzbekistan's own
+administrative units (viloyat, shahar, tumani, or the two republics) --
+recognised by the noun that names the kind of area, the same way the register
+itself names them, not by any list of place names. A country mentioned in a
+foreign-trade release (a trading partner, not a domestic area) is a different
+axis of the register entirely and is not extracted here.
 
 **The split of work is deliberate.** Everything here is mechanical -- regular
 expressions over the whole document, no model. That is not a shortcut; it is
@@ -43,7 +54,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 from ._pdf import PdfError, data_root, md_dir, md_path_for, relative
 
@@ -76,13 +87,35 @@ def _norm(text: str) -> str:
     return text.translate(_TRANSLATE)
 
 
+# The converter wraps images and some layout in raw HTML, and the numbers
+# inside a tag -- `img_in_image_box_169_511_224_564.jpg`, `width="4%"` -- are
+# pixel coordinates and sizing. Once the angle brackets are gone they read
+# exactly like figures, and on a real analytical report they were the first
+# dozens of "claims" returned. Tags are removed whole before any parsing, so
+# nothing inside markup can ever become a claim.
+_HTML_TAG = re.compile(r"<[^>]*>")
+_HTML_ENTITY = re.compile(r"&(?:nbsp|amp|lt|gt|quot|#\d+);")
+
+
+def _strip_html(line: str) -> str:
+    if "<" not in line and "&" not in line:
+        return line
+    return _HTML_ENTITY.sub(" ", _HTML_TAG.sub(" ", line))
+
+
 # --------------------------------------------------------------------------
 # Numbers
 # --------------------------------------------------------------------------
 # Uzbek statistical style: space groups the thousands, comma is the decimal
 # point. The grouped form is tried first so `1 849 650,0` is one figure and not
 # three. Only a literal space groups -- `\s` would join across a line break.
-_NUM_RE = re.compile(r"\d{1,3}(?: \d{3})+(?:,\d+)?|\d+(?:,\d+)?")
+# The first group is allowed up to six digits because OCR routinely swallows
+# the first thin space: a printed `1 072 670,1` arrives as `1072 670,1`, and
+# under a strict 1-3 digit rule that read as two claims, 1072 and 670,1 --
+# both wrong, on the headline figure of a real report. The one merged shape
+# this cannot safely absorb is a first group that is itself a plausible year;
+# `_figures` skips those whole (see there).
+_NUM_RE = re.compile(r"\d{1,6}(?: \d{3})+(?:,\d+)?|\d+(?:,\d+)?")
 
 # Digits joined by dots are never a measurement in this corpus, and reading
 # them as one is not an option either -- `1.01.01.0009` is a classifier code and
@@ -128,7 +161,10 @@ _MAG = (
     r"|минг|млн\.?|миллион|млрд\.?|миллиард|трлн\.?)"
 )
 _MEASURE = (
-    r"(?:so'm\w*|sum\w*|aqsh\s+dollar\w*|dollar\w*|yevro\w*|evro\w*"
+    # `som` (no apostrophe) is not how anyone writes the currency, but it is
+    # how OCR returns it after dropping the apostrophe from `so'm` -- and a
+    # lost unit on a headline figure costs more than this ambiguity.
+    r"(?:so'm\w*|sum\w*|som\w*|aqsh\s+dollar\w*|dollar\w*|yevro\w*|evro\w*"
     r"|tonna\w*|kilogramm\w*|kg\b|litr\w*|gektar\w*|kilometr\w*|km\b"
     r"|kv\.?\s*metr\w*|metr\s+kvadrat\w*|metr\w*|kvt\s*soat\w*"
     r"|kishi\w*|nafar\w*|dona\w*|birlik\w*|xo'jalik\w*|o'rin\w*|bosh\b"
@@ -243,6 +279,76 @@ def _period(norm: str, fallback_year: str | None) -> tuple[str | None, str | Non
 
 
 # --------------------------------------------------------------------------
+# Areas
+# --------------------------------------------------------------------------
+# The register's Area nodes are Uzbekistan's own administrative geography and
+# nothing else -- checked against the live graph: 223 rows, every one a
+# viloyat, a shahar, a tuman, or one of the two republics. No trading-partner
+# country is an Area (those are Category nodes, a different axis of the
+# register), so a country name here would be a false positive rather than a
+# missed one -- reason enough not to guess at it.
+#
+# A capitalised word immediately before one of those nouns is treated as its
+# name: cheap, and it is what the register's own naming convention already
+# guarantees -- "Andijon viloyati", never "viloyati Andijon". Up to two words
+# covers the compound names ("Sharof Rashidov tumani"); a run of Cyrillic is
+# accepted on the same terms, since some releases are published in it.
+_PROPER = r"[A-ZЎЁЀ-ӿ][\w'Ѐ-ӿ-]*"
+
+# The suffix stem is captured on its own and the case ending that follows is
+# thrown away ("viloyatida", "viloyatiga", "viloyatidan" all match) -- a claim
+# names its area in whatever case Uzbek grammar wants for that sentence, but
+# the register stores only the nominative-possessive form ("Andijon
+# viloyati"), so `_area` rebuilds that canonical form rather than keeping
+# whatever the release printed. Without this, "Andijon viloyatida" would be
+# sent to `statind_data` as-is and match nothing.
+_ADMIN_RE = re.compile(
+    rf"\b((?:{_PROPER}\s+){{0,2}}{_PROPER})\s*(viloyat|shahar|shahr|tuman)\w*\b"
+)
+_ADMIN_SUFFIX = {"viloyat": "viloyati", "shahar": "shahri", "shahr": "shahri", "tuman": "tumani"}
+
+# "Respublikasi" alone is not this safe: dozens of Category rows are foreign
+# countries whose own name ends the same way ("Fransiya Respublikasi",
+# "Koreya Xalq Demokratik Respublikasi"). What decides it is the word right
+# before "respublika...": nothing there (or a lowercase word) means the
+# corpus's own shorthand for the nationwide total ("respublika bo'yicha"); a
+# capitalised word that is not "O'zbekiston" or "Qoraqalpog'iston" means some
+# other country's name is doing the capitalising, so that match is skipped
+# rather than misread as domestic.
+_RESPUBLIKA_RE = re.compile(r"respublika\w*\b", re.IGNORECASE)
+_PRECEDING_PROPER_RE = re.compile(rf"({_PROPER})\s*$")
+
+
+def _area(norm: str) -> Optional[str]:
+    """
+    The Uzbek administrative area named in one normalised segment, if any.
+
+    Returns the register's own spelling of the match -- "O'zbekiston
+    Respublikasi" for the nationwide forms rather than whatever the release
+    wrote -- since this value is sent straight to `statind_data` as a
+    substring filter and the comparison is done there, not here.
+    """
+    admin = _ADMIN_RE.search(norm)
+    if admin:
+        name = " ".join(admin.group(1).split())
+        return f"{name} {_ADMIN_SUFFIX[admin.group(2)]}"
+
+    for match in _RESPUBLIKA_RE.finditer(norm):
+        proper = _PRECEDING_PROPER_RE.search(norm[: match.start()])
+        if not proper:
+            return "O'zbekiston Respublikasi"
+        word = proper.group(1).lower()
+        if word.startswith("o'zbekiston"):
+            return "O'zbekiston Respublikasi"
+        if word.startswith("qoraqalpog"):
+            return "Qoraqalpog'iston Respublikasi"
+        # Some other proper noun ends in "Respublikasi" -- a foreign country,
+        # not a domestic area. Not this tool's axis; try the next match
+        # rather than guessing.
+    return None
+
+
+# --------------------------------------------------------------------------
 # Segmentation
 # --------------------------------------------------------------------------
 # Splitting on a full stop is wrong here: the corpus is full of `mln.`,
@@ -263,6 +369,19 @@ def _sentences(block: str) -> Iterator[str]:
 
 _ENDS_SENTENCE = re.compile(r"[.!?:;…]\s*$")
 
+# A closed set of Uzbek nouns that grammatically demand a figure right after
+# them -- "... hajmi" is never a complete thought. A line ending in one of
+# these is wrapped mid-sentence even when the next line starts with a digit
+# rather than a lowercase letter, which is otherwise the only signal
+# `_continues` has. This is narrow on purpose: it exists to stop a wrap from
+# separating an area name from the figure it introduces ("Andijon viloyatida
+# ... hajmi" / "200 000,0 mlrd so'mni"), not to accept every digit-led line.
+_LEADS_TO_FIGURE = re.compile(
+    r"(hajmi|miqdori|qiymati|darajasi|ko'rsatkichi|summasi|narxi|ulushi|"
+    r"sur'ati|foizi|indeksi)\s*$",
+    re.IGNORECASE,
+)
+
 
 def _continues(previous: str, nxt: str) -> bool:
     """
@@ -270,20 +389,26 @@ def _continues(previous: str, nxt: str) -> bool:
 
     A blank line cannot answer this. The converter emits one for every printed
     line, so a sentence broken across the column arrives as two "paragraphs"
-    and a figure can end up separated from its unit. The test that works is
-    the pair: the previous line stopped without terminal punctuation, and this
-    one starts lower-case.
+    and a figure -- or the area name that gives it meaning -- can end up
+    separated from the rest of the sentence.
 
-    A continuation starting with a digit is missed by that rule, deliberately.
-    Accepting digits would swallow the heading in
+    Two tests, both requiring the previous line to have stopped without
+    terminal punctuation: `nxt` starting lower-case is the general case; `nxt`
+    starting with a digit is accepted only when the previous line's own
+    grammar demands one, via `_LEADS_TO_FIGURE`. Accepting every digit start
+    would swallow the heading in
 
         O'zbekiston Respublikasi Statistika agentligi
         2025-yil yakunlari
 
-    and a heading glued into `jumla` misquotes the release, while a missed join
-    only shortens a sentence whose figure is still read correctly.
+    and a heading glued into `jumla` misquotes the release -- worse than a
+    missed join, which only shortens a sentence.
     """
-    return not _ENDS_SENTENCE.search(previous) and nxt[:1].islower()
+    if _ENDS_SENTENCE.search(previous):
+        return False
+    if nxt[:1].islower():
+        return True
+    return bool(nxt[:1].isdigit() and _LEADS_TO_FIGURE.search(_norm(previous)))
 
 
 def _prose_segments(text: str) -> Iterator[str]:
@@ -291,6 +416,10 @@ def _prose_segments(text: str) -> Iterator[str]:
     buffer: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
+        # Markup is dropped before anything looks at the line: a line that was
+        # pure HTML becomes blank here and is skipped like one.
+        if not stripped.startswith("|"):
+            stripped = _strip_html(stripped).strip()
         # Blank lines carry no information here -- see `_continues`.
         if not stripped:
             continue
@@ -340,7 +469,11 @@ _ROW_SEP = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
 
 
 def _cells(line: str) -> list[str]:
-    return [c.strip() for c in line.strip().strip("|").split("|")]
+    # Tag-stripped per cell, not per line: `<br>` inside a cell must not
+    # survive into a label, but the `|` structure has to be read first.
+    return [
+        _strip_html(c).strip() for c in line.strip().strip("|").split("|")
+    ]
 
 
 def _tables(text: str) -> Iterator[tuple[list[str], list[str]]]:
@@ -379,6 +512,13 @@ def _figures(segment: str) -> Iterator[tuple[float, str]]:
         raw, end = match.group(0), match.end()
         if any(start <= match.start() < stop for start, stop in dotted):
             continue
+        first = raw.split(" ", 1)[0]
+        if " " in raw and len(first) >= 4 and 1900 <= int(first) <= 2100:
+            # `2025 123,4` is unreadable: either an OCR-merged figure in the
+            # couple-of-quadrillion range or a year standing next to a number.
+            # A wrong claim costs more than a missed one, so neither reading
+            # is emitted.
+            continue
         if _NOT_A_FIGURE.match(norm, end):
             continue
         unit, _ = _unit_after(norm, end)
@@ -391,12 +531,19 @@ def _figures(segment: str) -> Iterator[tuple[float, str]]:
         yield value, unit
 
 
-def _claims(text: str, limit: int) -> tuple[list[dict[str, Any]], int]:
+def _claims(
+    text: str, limit: int, offset: int = 0
+) -> tuple[list[dict[str, Any]], int]:
     """
     Pull the checkable claims out of a converted release.
 
-    Returns the claims and how many were found in total, so a truncated list
-    can say so instead of looking complete.
+    Returns the claims and how many exist in total, so a truncated list can
+    say so instead of looking complete. `offset` skips that many claims first:
+    extraction is deterministic, so the pages of a long document line up
+    across calls -- which is the only way a 200-figure analytical report fits
+    through the per-call cap at all. Without it the cap was a dead end: the
+    caller was told to raise a limit already at its maximum, got the identical
+    reply back, and looped.
     """
     claims: list[dict[str, Any]] = []
     total = 0
@@ -411,9 +558,14 @@ def _claims(text: str, limit: int) -> tuple[list[dict[str, Any]], int]:
             # without repeating it, so it carries forward until another is
             # stated.
             year = period[:4]
+        # Unlike the period, an area is not carried forward: a sentence with
+        # no area of its own almost always means the national figure, and
+        # inheriting the previous sentence's region would misfile it as a
+        # regional claim it never made.
+        area = _area(norm)
         for value, unit in _figures(segment):
             total += 1
-            if len(claims) >= limit:
+            if total <= offset or len(claims) >= limit:
                 continue
             claim: dict[str, Any] = {"jumla": segment, "raqam": value}
             if unit:
@@ -422,29 +574,48 @@ def _claims(text: str, limit: int) -> tuple[list[dict[str, Any]], int]:
                 claim["davr"] = period
                 if phrase:
                     claim["davr_matni"] = phrase.strip()
+            if area:
+                claim["manzil"] = area
             claims.append(claim)
 
     for header, row in _tables(text):
         label = row[0] if row else ""
         if not label:
             continue
+        row_area = _area(_norm(label))
+        # Trust the row label as *being* an area name only when the match
+        # covers most of it -- a label that merely mentions a region in
+        # passing ("Andijon viloyatida ishlab chiqarilgan g'alla hajmi") is
+        # still the indicator's name, not a per-region breakdown.
+        is_area_row = bool(row_area) and len(row_area) >= 0.6 * len(label.strip())
         name, label_unit = _split_label(label)
+
         for index, cell in enumerate(row[1:], start=1):
             column = header[index] if index < len(header) else ""
             for value, unit in _figures(cell):
                 total += 1
-                if len(claims) >= limit:
+                if total <= offset or len(claims) >= limit:
                     continue
                 period, _ = _period(_norm(f"{column} {label}"), year)
                 claim = {
                     "jumla": f"{label} | {column}: {cell}".strip(" |:"),
                     "raqam": value,
+                    "manba": "jadval",
+                }
+                if is_area_row:
+                    # The row itself names the region; the indicator has to
+                    # come from context the extractor cannot see structurally
+                    # (a caption, a heading above the table) -- `korsatkich`
+                    # stays out rather than being set to a place name.
+                    claim["manzil"] = row_area
+                else:
                     # A row label is the indicator's own name as the release
                     # printed it -- structure, not a guess, so it is safe to
                     # hand to `statind_code`.
-                    "korsatkich": name,
-                    "manba": "jadval",
-                }
+                    claim["korsatkich"] = name
+                    col_area = _area(_norm(column))
+                    if col_area:
+                        claim["manzil"] = col_area
                 # The cell's own unit wins: a column can restate it ("2025, %")
                 # while the row label carries the general one.
                 if unit or label_unit:
@@ -507,15 +678,29 @@ TOOL_SCHEMA: dict[str, Any] = {
         "guessed. Take it to `statind_code`, then `davr` to `statind_data`, "
         "then compare `raqam` -- checking the unit first, since a release and "
         "the register do not always print the same one.\n"
+        "`manzil` names a Uzbek region, city or district the claim is about "
+        "('Andijon viloyati', 'Toshkent shahri', 'O'zbekiston Respublikasi' for "
+        "the nationwide figure), when the claim states one. PASS IT AS `hudud` "
+        "TO `statind_data` -- most indicators here are cut by area, and a claim "
+        "about Andijon has to be checked against Andijon's row, not the first "
+        "row `statind_data` happens to return. No `manzil` does not mean "
+        "national -- it means the release did not say, so ask rather than "
+        "assume before comparing a regional-looking figure. A claim whose "
+        "`manzil` is present but `korsatkich` is not came from a per-region "
+        "table row: the indicator name is not in this claim and has to be read "
+        "from a heading or caption near the table in the Markdown.\n"
         "`manba: \"jadval\"` marks a claim assembled from a table row and "
         "column header. Its figure is exact but its wording is reconstructed, "
         "so quote it as a table entry, not as a sentence the release wrote.\n"
         "THE CLAIMS ARE WHAT THE RELEASE STATES, NOT WHAT IS TRUE. Nothing "
         "here is verified against anything; verifying is the next call.\n"
         "Extraction is mechanical, so it finds every figure in the file but "
-        "understands none of them. Years standing alone are skipped as dates. "
-        "If `jami_topildi` is larger than the list, raise `limit` rather than "
-        "assuming the rest do not exist."
+        "understands none of them. Years standing alone are skipped as dates.\n"
+        "A LONG DOCUMENT IS READ IN PAGES. When `jami_topildi` is larger than "
+        "the list, take the next page with the `offset` the reply names -- do "
+        "NOT repeat the same call, and do not raise `limit` past its maximum: "
+        "identical arguments return the identical reply. Claims come back in "
+        "a stable document order, so pages never overlap or skip."
     ),
     "parameters": {
         "type": "object",
@@ -533,6 +718,15 @@ TOOL_SCHEMA: dict[str, Any] = {
                     f"Maximum claims to return. Defaults to {_DEFAULT_CLAIMS}, "
                     f"maximum {_MAX_CLAIMS}. A release full of tables reaches "
                     "it quickly."
+                ),
+            },
+            "offset": {
+                "type": "integer",
+                "description": (
+                    "How many claims to skip, for paging through a long "
+                    "document: offset=80 returns the 81st claim onwards. The "
+                    "reply's `qisqartirildi` note names the offset of the "
+                    "next page."
                 ),
             },
         },
@@ -554,6 +748,12 @@ def pdf_extract_handler(params: dict[str, Any]) -> dict[str, Any]:
     limit = max(1, min(limit, _MAX_CLAIMS))
 
     try:
+        offset = int(params.get("offset") or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    offset = max(0, offset)
+
+    try:
         path = _resolve_md(name)
         text = path.read_text(encoding="utf-8")
     except PdfError as exc:
@@ -562,13 +762,14 @@ def pdf_extract_handler(params: dict[str, Any]) -> dict[str, Any]:
         logger.warning("pdf_extract: cannot read %s: %s", name, exc)
         return {"success": False, "error": f"faylni o'qib bo'lmadi: {exc}"}
 
-    claims, total = _claims(text, limit)
+    claims, total = _claims(text, limit, offset)
     logger.info(
-        "pdf_extract: %s, %d chars, %d/%d claims",
+        "pdf_extract: %s, %d chars, %d/%d claims, offset=%d",
         relative(path),
         len(text),
         len(claims),
         total,
+        offset,
     )
     out: dict[str, Any] = {
         "success": True,
@@ -578,10 +779,22 @@ def pdf_extract_handler(params: dict[str, Any]) -> dict[str, Any]:
         "jami": len(claims),
         "jami_topildi": total,
     }
-    if total > len(claims):
+    if claims and (offset or total > offset + len(claims)):
+        out["oraliq"] = f"{offset + 1}-{offset + len(claims)}"
+    if total > offset + len(claims):
+        # Name the exact next call. The old wording said "raise the limit",
+        # which at the cap was advice that could not be followed -- the caller
+        # retried with identical arguments, got the identical reply, and
+        # looped until its iteration budget ran out.
         out["qisqartirildi"] = (
-            f"{total} ta raqamdan {len(claims)} tasi qaytarildi -- qolganini "
-            "ko'rish uchun `limit` ni oshiring"
+            f"{total} ta raqamdan {offset + 1}-{offset + len(claims)} "
+            f"oralig'i qaytarildi -- keyingi sahifa uchun "
+            f"`offset={offset + len(claims)}` bilan chaqiring"
+        )
+    if total and not claims:
+        out["izoh"] = (
+            f"offset={offset} hujjatdagi {total} ta raqamdan katta -- "
+            "sahifalar tugadi"
         )
     if not total:
         # An empty result is a statement about the document, and it has two
