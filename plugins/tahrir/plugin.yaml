@@ -1,0 +1,13 @@
+name: tahrir
+version: "0.1.0"
+description: >
+  Editorial checks for a press release. `text_check` finds what a figure
+  comparison cannot: mixed alphabets inside a word, several apostrophe
+  styles, one value written two ways, repeated words, a missing space after
+  a full stop, a share above 100 per cent, and an index published as a growth
+  rate -- the last of which the register itself cannot flag, because the
+  number matches.
+author: PressRelizAgent
+kind: standalone
+provides_tools:
+  - text_check

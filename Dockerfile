@@ -58,7 +58,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HERMES_ENABLE_PROJECT_PLUGINS=true \
     PYTHONPATH=/opt/hermes-agent \
 \
-    HERMES_ENABLED_TOOLSETS=memory,session_search,skills,todo,pressreliz,pdfmd,telegram \
+    HERMES_ENABLED_TOOLSETS=memory,session_search,skills,todo,pressreliz,pdfmd,telegram,tahrir \
     HERMES_SYSTEM_PROMPT_PATH=/app/prompts/hermes_coordinator.md \
     LOG_DIR=/app/logs \
     APP_HOST=0.0.0.0 \

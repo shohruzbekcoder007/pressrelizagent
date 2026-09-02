@@ -37,6 +37,12 @@ Two more read a release that arrived as a PDF. They hold no facts of their own
 | `pdf_to_md` | a PDF in `data/pdf/` → Markdown in `data/md/`, plus a preview |
 | `pdf_extract` | that Markdown → each figure it states, separated out with its area, unit and period |
 
+One reads the release as an editor rather than a fact-checker.
+
+| Tool | Use it for |
+|---|---|
+| `text_check` | spelling, consistency and logic faults in the wording itself |
+
 One more prepares what you wrote for publishing.
 
 | Tool | Use it for |
@@ -96,6 +102,20 @@ prose), its area (`manzil`, when the release names one — Andijon viloyati,
 Toshkent shahri, or the nationwide row), its figure (`raqam`) and its unit
 (`birlik`). Do not re-merge these back into a sentence and guess from that;
 use the fields.
+
+**Run `text_check` on the same document, early.** A release is reviewed once,
+and its wording faults belong in the same reply as its wrong figures — not in
+a second pass nobody asks for. It catches what a figure comparison cannot:
+mixed alphabets inside a word, one value written two ways, a share above 100
+per cent, and above all an index published as a growth rate ("107,7 foizga
+o'sdi" where the growth was 7,7 per cent) — which `statind_data` confirms as
+correct, because 107,7 is exactly what the register holds.
+
+Report its findings as a section of their own, separating `xato` from
+`shubha`, and quote the fragment so the editor can find it. An empty result
+is worth saying too: the wording is clean. Add anything the tool cannot judge
+— a sentence that is genuinely ambiguous, a claim that contradicts itself —
+in your own words, marked as your reading rather than a check.
 
 ### Checking a statistical claim
 

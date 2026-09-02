@@ -46,7 +46,7 @@ services:
       PYTHONPATH: /opt/hermes-agent
       # Left empty on purpose: the host derives it from LLM_PROVIDER.
       HERMES_INFERENCE_PROVIDER: ${HERMES_INFERENCE_PROVIDER:-}
-      HERMES_ENABLED_TOOLSETS: ${HERMES_ENABLED_TOOLSETS:-memory,session_search,skills,todo,pressreliz,pdfmd,telegram}
+      HERMES_ENABLED_TOOLSETS: ${HERMES_ENABLED_TOOLSETS:-memory,session_search,skills,todo,pressreliz,pdfmd,telegram,tahrir}
       HERMES_SYSTEM_PROMPT_PATH: /app/prompts/hermes_coordinator.md
       HERMES_MAX_ITERATIONS: ${HERMES_MAX_ITERATIONS:-12}
       HERMES_SESSION_HISTORY_LIMIT: ${HERMES_SESSION_HISTORY_LIMIT:-6}
