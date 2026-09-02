@@ -61,6 +61,16 @@ services:
       # A layout model, page by page -- minutes on CPU for a long release.
       PDF_CONVERT_TIMEOUT: ${PDF_CONVERT_TIMEOUT:-600}
       PDF_BACKEND: ${PDF_BACKEND:-auto}
+      # Long turns. The work runs on its own thread either way; these
+      # decide how the request that asked for it behaves meanwhile.
+      # 0 = hold the connection until the turn finishes (old behaviour);
+      # any positive value hands back a job_id instead of hanging.
+      CHAT_WAIT_SECONDS: ${CHAT_WAIT_SECONDS:-0}
+      # SSE progress cadence -- under a proxy's usual 30-60s idle timeout.
+      CHAT_HEARTBEAT_SECONDS: ${CHAT_HEARTBEAT_SECONDS:-10}
+      # How long a finished turn stays collectable by job id.
+      JOB_TTL_SECONDS: ${JOB_TTL_SECONDS:-3600}
+      JOB_MAX: ${JOB_MAX:-500}
       # Neo4j — reached over the compose network, so the container port (7687)
       # is what matters here, not the published one.
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
@@ -99,6 +109,13 @@ services:
       # Bind-mounted so a tool edit needs a restart, not a rebuild.
       # start.sh copies each plugin into $HERMES_HOME/plugins on boot.
       - ./plugins:/app/plugins:ro
+      # Same treatment for the service code. The image still COPYs it, so
+      # an image built elsewhere is self-contained; mounting it here just
+      # means an api.py edit is a restart rather than a full rebuild --
+      # which matters because the build re-clones the Hermes framework
+      # from GitHub, and that is not always reachable from this host.
+      - ./app:/app/app:ro
+      - ./agents:/app/agents:ro
 
     healthcheck:
       test: ["CMD", "/app/scripts/healthcheck.sh"]

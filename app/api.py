@@ -13,15 +13,18 @@ own, for uploading ahead of time.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import re
 import secrets
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 # Starlette's, not FastAPI's. `fastapi.UploadFile` is a subclass, and
@@ -29,9 +32,34 @@ from pydantic import BaseModel, Field, ValidationError
 # rejects every real upload.
 from starlette.datastructures import UploadFile
 
-from app import __version__
+from app import __version__, jobs
 
 logger = logging.getLogger("app")
+
+# How long a plain JSON `/v1/chat` holds the connection before handing back a
+# job id instead. 0 keeps the old behaviour of waiting for as long as it
+# takes -- correct when nothing between the caller and here has an idle
+# timeout, and the wrong default the moment something does.
+_DEFAULT_CHAT_WAIT = 0.0
+# Progress line cadence on the SSE path. Comfortably under the 30-60s idle
+# timeout typical of a proxy or an HTTP client's read deadline.
+_DEFAULT_HEARTBEAT = 10.0
+
+
+def _chat_wait_seconds() -> Optional[float]:
+    try:
+        value = float(os.getenv("CHAT_WAIT_SECONDS") or _DEFAULT_CHAT_WAIT)
+    except ValueError:
+        value = _DEFAULT_CHAT_WAIT
+    return None if value <= 0 else value
+
+
+def _heartbeat_seconds() -> float:
+    try:
+        value = float(os.getenv("CHAT_HEARTBEAT_SECONDS") or _DEFAULT_HEARTBEAT)
+    except ValueError:
+        value = _DEFAULT_HEARTBEAT
+    return max(1.0, value)
 
 # Uploads land in the same folder the `pdfmd` tools read, which is bind-mounted
 # from ./data. Nothing is imported from the plugin to get here: Hermes loads
@@ -146,6 +174,13 @@ class ChatRequest(BaseModel):
         default=False,
         description="Clear Hermes host session history",
     )
+    stream: bool = Field(
+        default=False,
+        description=(
+            "Answer as Server-Sent Events: a progress line every few seconds, "
+            "then the result. Keeps a long turn's connection alive."
+        ),
+    )
 
 
 class ChatResponse(BaseModel):
@@ -164,6 +199,79 @@ class ChatResponse(BaseModel):
     # Files stored from this request's multipart form, under the names the
     # tools will see. Absent on a plain JSON chat.
     files: Optional[list[str]] = None
+    # Set only while a turn is still running: the answer is not here yet, and
+    # `job_id` is where to collect it. A finished reply never carries these,
+    # so a client that ignores them behaves exactly as it did before.
+    status: Optional[str] = None
+    job_id: Optional[str] = None
+    elapsed: Optional[float] = None
+
+
+def _chat_response(
+    job: "jobs.Job",
+    body: Optional[ChatRequest],
+    stored: Optional[list[str]],
+) -> ChatResponse:
+    """The finished turn, in the shape callers have always received."""
+    result = job.result or {}
+    session_id = result.get("session_id") or (
+        body.session_id if body else job.session_id
+    )
+    return ChatResponse(
+        success=bool(result.get("success")),
+        response=result.get("response"),
+        session_id=session_id,
+        error=result.get("error"),
+        error_code=result.get("error_code"),
+        error_detail=result.get("error_detail"),
+        retryable=result.get("retryable"),
+        tools_called=result.get("tools_called"),
+        tool_call_count=result.get("tool_call_count"),
+        agents_used=result.get("agents_used"),
+        mode=result.get("mode"),
+        backend=result.get("backend"),
+        files=stored or None,
+        job_id=job.id,
+        elapsed=job.elapsed,
+    )
+
+
+def _sse(event: str, payload: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _stream_job(
+    job: "jobs.Job",
+    body: ChatRequest,
+    stored: Optional[list[str]],
+) -> AsyncIterator[str]:
+    """
+    Progress lines until the turn lands, then the answer.
+
+    The first event goes out immediately: a client that sees no bytes at all
+    cannot tell a working server from a hung one, and neither can the proxies
+    in between.
+
+    Completion is polled far more finely than the heartbeat cadence so a turn
+    that finishes just after a progress line is not held back until the next
+    one -- the heartbeat governs how often we *speak*, not how long we wait.
+    """
+    heartbeat = _heartbeat_seconds()
+    yield _sse("progress", job.snapshot())
+
+    waited = 0.0
+    tick = 0.25
+    while not await asyncio.to_thread(job.wait, 0):
+        await asyncio.sleep(tick)
+        waited += tick
+        if waited >= heartbeat:
+            waited = 0.0
+            yield _sse("progress", job.snapshot())
+
+    yield _sse("done", _chat_response(job, body, stored).model_dump())
+    # Mirrors the OpenAI streaming convention, so a gateway written against
+    # that shape recognises the end of the stream without special-casing us.
+    yield "data: [DONE]\n\n"
 
 
 def _validated(payload: dict[str, Any]) -> ChatRequest:
@@ -241,6 +349,7 @@ async def _read_chat(request: Request) -> tuple[ChatRequest, list[str]]:
                 "message": _mention(message, stored) if stored else message,
                 "session_id": session,
                 "reset_session": _form_bool(form.get("reset_session")),
+                "stream": _form_bool(form.get("stream")),
             }
         ),
         stored,
@@ -411,7 +520,7 @@ def create_app() -> FastAPI:
     async def chat(
         request: Request,
         _: None = Depends(_check_bearer),
-    ) -> ChatResponse:
+    ) -> Any:
         """
         Gateway entry: Hermes host keeps context and calls its tools.
 
@@ -424,53 +533,139 @@ def create_app() -> FastAPI:
             or more PDFs. The files are stored first and their names are added
             to the message, so asking about an attachment is one request rather
             than an upload followed by a chat.
+
+        The turn itself runs on its own thread (see `app.jobs`). A checking
+        turn takes minutes, and holding the request open for all of it is what
+        put it at the mercy of every idle timer on the path. Three ways out,
+        all of them keeping the work alive:
+
+          * `stream: true` (or `Accept: text/event-stream`) -- Server-Sent
+            Events, a progress line every few seconds, then the answer. Bytes
+            keep flowing, so nothing on the path times the connection out.
+            This is the recommended shape for a gateway.
+          * plain JSON -- waits like it always has. `CHAT_WAIT_SECONDS` caps
+            the wait; past it the reply is `status: "running"` with a
+            `job_id` rather than a hung request.
+          * a retry -- same session and same message while the first turn is
+            still running attaches to it instead of starting a second one.
+
+        In every case a dropped connection leaves the turn running and its
+        answer collectable from `GET /v1/jobs/{job_id}`.
         """
         from agents.hermes_host import get_hermes_host
 
         body, stored = await _read_chat(request)
-        try:
-            host = get_hermes_host()
+        wants_stream = bool(body.stream) or "text/event-stream" in (
+            request.headers.get("accept") or ""
+        )
+
+        existing = jobs.find_running(
+            body.session_id, body.message, body.reset_session
+        )
+        if existing is not None:
             logger.info(
-                "POST /v1/chat session_id=%r reset=%s files=%s msg_len=%d "
-                "msg_preview=%r",
+                "POST /v1/chat attaching to running job %s (session=%r)",
+                existing.id,
+                body.session_id,
+            )
+            job = existing
+        else:
+            logger.info(
+                "POST /v1/chat session_id=%r reset=%s files=%s stream=%s "
+                "msg_len=%d msg_preview=%r",
                 body.session_id,
                 body.reset_session,
                 stored or "-",
+                wants_stream,
                 len(body.message or ""),
                 (body.message or "")[:80],
             )
-            result = host.chat(
-                body.message,
+            host = get_hermes_host()
+            job = jobs.start(
+                lambda: host.chat(
+                    body.message,
+                    session_id=body.session_id,
+                    reset_session=body.reset_session,
+                ),
                 session_id=body.session_id,
-                reset_session=body.reset_session,
+                message=body.message,
+                reset=body.reset_session,
+                files=stored,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("chat endpoint failed: %s", exc, exc_info=True)
+
+        if wants_stream:
+            return StreamingResponse(
+                _stream_job(job, body, stored),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    # Tell nginx not to buffer: a buffered SSE stream arrives
+                    # in one lump at the end, which defeats the whole point.
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        # `asyncio.to_thread` rather than a bare blocking wait: the wait must
+        # not occupy the event loop, or one long turn would stall every other
+        # request the service is serving.
+        wait = _chat_wait_seconds()
+        finished = await asyncio.to_thread(job.wait, wait)
+        if not finished:
             return ChatResponse(
-                success=False,
+                success=True,
                 response=None,
                 session_id=body.session_id,
-                error="Ichki server xatosi. Iltimos keyinroq urinib ko'ring.",
-                error_code="internal",
-                error_detail=str(exc)[:500],
-                retryable=True,
+                status="running",
+                job_id=job.id,
+                elapsed=job.elapsed,
                 files=stored or None,
+                error=None,
             )
-        return ChatResponse(
-            success=bool(result.get("success")),
-            response=result.get("response"),
-            session_id=result.get("session_id") or body.session_id,
-            error=result.get("error"),
-            error_code=result.get("error_code"),
-            error_detail=result.get("error_detail"),
-            retryable=result.get("retryable"),
-            tools_called=result.get("tools_called"),
-            tool_call_count=result.get("tool_call_count"),
-            agents_used=result.get("agents_used"),
-            mode=result.get("mode"),
-            backend=result.get("backend"),
-            files=stored or None,
-        )
+        return _chat_response(job, body, stored)
+
+    @app.get("/v1/jobs/{job_id}", response_model=ChatResponse)
+    def job_status(
+        job_id: str,
+        _: None = Depends(_check_bearer),
+    ) -> Any:
+        """
+        Collect a turn started earlier, whatever happened to its connection.
+
+        Still running: `status: "running"` with the seconds so far. Finished:
+        the full answer, exactly as `/v1/chat` would have returned it.
+        """
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"job topilmadi: {job_id} (eskirgan yoki noto'g'ri id)",
+            )
+        if job.status != "done":
+            return ChatResponse(
+                success=True,
+                response=None,
+                session_id=job.session_id,
+                status="running",
+                job_id=job.id,
+                elapsed=job.elapsed,
+                files=job.files or None,
+            )
+        return _chat_response(job, None, job.files)
+
+    @app.get("/v1/jobs")
+    def job_list(
+        session_id: Optional[str] = None,
+        _: None = Depends(_check_bearer),
+    ) -> dict[str, Any]:
+        """The most recent turn for a session -- how a reconnecting client
+        finds the job it lost the connection to without holding its id."""
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id kerak")
+        job = jobs.latest_for_session(session_id)
+        if job is None:
+            return {"success": True, "job": None}
+        return {"success": True, "job": job.snapshot()}
 
     return app
 

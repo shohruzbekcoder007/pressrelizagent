@@ -36,7 +36,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("hermes.plugin.pdfmd.pdf")
 
@@ -82,6 +82,44 @@ def ensure_dirs() -> None:
             logger.warning("pdfmd: cannot create %s: %s", path, exc)
 
 
+def closest(wanted: str, candidates: list[str]) -> Optional[str]:
+    """
+    The one existing name a near-miss obviously meant, or None.
+
+    Uploaded reports carry long machine-made names, and a model retyping one
+    quietly normalises it -- a real turn asked six times for
+    `talil-2026-j_-janvar-iyun-...` when the file on disk said `-yanvar-`,
+    the Russian spelling of the month against the Uzbek one. One letter in
+    forty-five. The listing of real names was in every error reply and the
+    difference was still missed, so the tool has to close the gap itself
+    rather than expecting the caller to spot it.
+
+    Two guards keep this from opening the wrong document, which for a
+    verification tool would be worse than failing: the match must be very
+    close, and it must be clearly closer than the runner-up. Two genuinely
+    similar names -- last month's report and this month's -- resolve to
+    nothing and the caller is told to choose.
+    """
+    from difflib import SequenceMatcher
+
+    target = wanted.strip().lower()
+    if not target or not candidates:
+        return None
+
+    scored = sorted(
+        ((SequenceMatcher(None, target, c.lower()).ratio(), c) for c in candidates),
+        reverse=True,
+    )
+    best_score, best = scored[0]
+    if best_score < 0.82:
+        return None
+    if len(scored) > 1 and scored[1][0] > best_score - 0.06:
+        # Two names about equally close: guessing between them is exactly the
+        # case where being wrong is silent and expensive.
+        return None
+    return best
+
+
 def _inside(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -119,7 +157,22 @@ def resolve_pdf(name: str) -> Path:
     if not _inside(path, root):
         raise PdfError(f"fayl ma'lumotlar papkasidan tashqarida: {name!r}")
     if not path.is_file():
-        raise PdfError(f"fayl topilmadi: {name!r} (data/pdf/ ichiga qo'ying)")
+        # Before giving up, check whether one existing file is unmistakably
+        # what was meant -- see `closest`. The reply still reports the name
+        # actually opened, so a substitution is never invisible.
+        try:
+            available = sorted(p.name for p in pdf_dir().glob("*.pdf"))
+        except OSError:
+            available = []
+        near = closest(Path(raw).name, available)
+        if near:
+            logger.info("pdfmd: %r resolved to nearest match %r", name, near)
+            path = (pdf_dir() / near).resolve()
+        else:
+            hint = f" (mavjud: {', '.join(available)})" if available else ""
+            raise PdfError(
+                f"fayl topilmadi: {name!r}{hint} -- data/pdf/ ichiga qo'ying"
+            )
     if path.suffix.lower() != ".pdf":
         raise PdfError(f"bu PDF emas: {path.name}")
 

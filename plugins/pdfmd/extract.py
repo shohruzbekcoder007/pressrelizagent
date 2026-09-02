@@ -56,7 +56,14 @@ import re
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from ._pdf import PdfError, data_root, md_dir, md_path_for, relative
+from ._pdf import (
+    PdfError,
+    closest,
+    data_root,
+    md_dir,
+    md_path_for,
+    relative,
+)
 
 logger = logging.getLogger("hermes.plugin.pdfmd.extract")
 
@@ -653,8 +660,16 @@ def _resolve_md(name: str) -> Path:
         if path.is_file() and path.suffix.lower() == ".md":
             return path
 
-    known = sorted(p.name for p in md_dir().glob("*.md"))[:20]
-    hint = f" (mavjud: {', '.join(known)})" if known else ""
+    known = sorted(p.name for p in md_dir().glob("*.md"))
+    # A one-letter slip in a long machine-made name cost a real turn six
+    # calls, cycling through path spellings while the name itself stayed
+    # wrong. `closest` only answers when one candidate is unmistakable.
+    near = closest(f"{stem}.md", known)
+    if near:
+        logger.info("pdf_extract: %r resolved to nearest match %r", name, near)
+        return md_dir() / near
+
+    hint = f" (mavjud: {', '.join(known[:20])})" if known else ""
     raise PdfError(
         f"markdown topilmadi: {name!r}{hint} -- avval `pdf_to_md` ni chaqiring"
     )
@@ -775,10 +790,20 @@ def pdf_extract_handler(params: dict[str, Any]) -> dict[str, Any]:
         "success": True,
         "fayl": relative(path),
         "belgi": len(text),
+    }
+    if Path(name).stem != path.stem:
+        # Never let a near-miss match pass unremarked: the caller asked about
+        # one document and is being answered about another.
+        out["soralgan"] = name
+        out["izoh_fayl"] = (
+            f"so'ralgan {name!r} topilmadi; eng yaqin mos fayl "
+            f"{path.name!r} o'qildi"
+        )
+    out.update({
         "dalillar": claims,
         "jami": len(claims),
         "jami_topildi": total,
-    }
+    })
     if claims and (offset or total > offset + len(claims)):
         out["oraliq"] = f"{offset + 1}-{offset + len(claims)}"
     if total > offset + len(claims):
