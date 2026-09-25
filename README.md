@@ -519,27 +519,45 @@ scripts/
 
 ## Endpoints
 
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/health` | — | liveness — never touches the LLM |
+| GET | `/ready` | — | `200`/`503` only; details are logged, not returned |
+| GET | `/v1/info` | token | backend, provider, model, tools (no upstream URL) |
+| POST | `/v1/chat` | token + user | JSON or multipart with PDFs; SSE with `stream: true` |
+| GET | `/v1/jobs/{job_id}` | token + user | collect a turn; another user's id is `404` |
+| GET | `/v1/jobs?session_id=` | token + user | the caller's latest turn in a session |
+| POST / GET | `/v1/files` | token + user | store / list the caller's own PDFs |
+| GET | `/docs` | — | OpenAPI UI |
 
+## Multi-user isolation
 
-| Method | Path | Purpose |
+Every user gets a full Hermes profile of their own — memory, skills, session
+history, `session_search` — plus their own upload folder and job registry.
+The gateway authenticates the end user; this service trusts its word only on
+a request that also carries the gateway token.
 
-|---|---|---|
+```
+Authorization: Bearer <GATEWAY_TOKEN>   # the gateway's HERMES_GIS_API_KEY
+X-User-Id: shohruz                      # the authenticated Open WebUI user
+```
 
-| GET | `/health` | liveness — never touches the LLM |
+| What | Where |
+|---|---|
+| Hermes profile | `$HERMES_USERS_HOME/<slug>/` (volume `pressrelizagent-hermes-users`) via `set_hermes_home_override()` — see `agents/user_profiles.py` |
+| Session history | in-process, keyed `"<slug>:<session_id>"` |
+| Jobs | owned by the slug; lookups by any other user answer `404` |
+| Uploads / Markdown | `data/users/<slug>/pdf/`, `data/users/<slug>/md/`; `pdfmd` reads the slug back from the active Hermes home and **refuses** rather than falling back to a shared folder |
 
-| GET | `/ready` | host readiness; `503` when not ready |
+Failure modes are deliberately loud: no `GATEWAY_TOKEN` → the service does
+not start (`ALLOW_UNAUTHENTICATED=true` for local dev only); no `X-User-Id` →
+`400` (`HERMES_REQUIRE_USER_ID=false` for a single-user install, which uses
+one `_shared` profile); a header carrying `/`, `\`, NUL or `..` → `400`. Ids
+that are valid but not directory-safe (emails, Cyrillic) are hashed to
+`u-<sha256>`.
 
-| GET | `/v1/info` | backend, provider, model, task model, registered tools |
-
-| POST | `/v1/chat` | chat; `{"message": "...", "session_id": "...", "reset_session": false}` |
-
-| GET | `/docs` | OpenAPI UI |
-
-
-
-Set `API_BEARER_TOKEN` to require `Authorization: Bearer …` on `/v1/chat`.
-
-
+Files uploaded before this change sit in the old flat `data/pdf/` and are no
+longer visible to anyone; move them into `data/users/<slug>/pdf/` if needed.
 
 ## Run
 
@@ -620,9 +638,15 @@ All via environment (`.env`, see `.env.example`).
 
 | `HERMES_REASONING_ENABLED` | `false` | keep `false` on gpt-4* |
 
-| `API_BEARER_TOKEN` | — | unset = no auth |
+| `GATEWAY_TOKEN` | — | **required**; gateway's bearer token (`API_BEARER_TOKEN` accepted as the old name) |
+| `ALLOW_UNAUTHENTICATED` | `false` | local dev only: start without a token |
+| `HERMES_REQUIRE_USER_ID` | `true` | `false` = one shared profile (single-user installs) |
+| `HERMES_USERS_HOME` | `/home/appuser/.hermes-users` | per-user Hermes profiles |
+| `RATE_LIMIT_PER_MINUTE` / `RATE_LIMIT_BURST` | `30` / `10` | per user; `0` disables |
+| `MAX_MESSAGE_CHARS` | `8000` | longer messages get `422` |
+| `BIND_ADDRESS` | `0.0.0.0` | `127.0.0.1` keeps the port off the LAN — check the gateway still reaches it |
 
-| `CORS_ORIGINS` | `*` | comma-separated |
+| `CORS_ORIGINS` | — | exact origins, comma-separated; `*` is refused |
 
 | `NEO4J_URI` | `bolt://neo4j:7687` | in-network address; container port, not published |
 

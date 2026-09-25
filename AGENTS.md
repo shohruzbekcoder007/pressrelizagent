@@ -37,6 +37,9 @@ related:
 | Central AI governance regulations (Order 56) | gis-ai-dept | `knowledge/regulations/` in `gis-ai-dept` |
 | Fast-API application entry point & routes | app/ | [api.py](app/api.py), [main.py](app/main.py) |
 | Hermes Host Agent lifecycle & runner | agents/ | [hermes_host.py](agents/hermes_host.py) |
+| Per-user profile isolation (`X-User-Id` → Hermes home) | agents/ | [user_profiles.py](agents/user_profiles.py) |
+| Per-user rate limiting | app/ | [rate_limit.py](app/rate_limit.py) |
+| Background turns & job ownership | app/ | [jobs.py](app/jobs.py) |
 | Press-release indicator lookup (`statind_code`) | plugins/pressreliz/ | [statind.py](plugins/pressreliz/statind.py) |
 | Published observations query (`statind_data`) | plugins/pressreliz/ | [data.py](plugins/pressreliz/data.py) |
 | SDMX source URL resolution (`statind_data_url`) | plugins/pressreliz/ | [sdmx.py](plugins/pressreliz/sdmx.py) |

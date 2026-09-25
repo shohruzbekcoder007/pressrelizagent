@@ -4,12 +4,12 @@ Shared file handling and PDF backends for the `pdfmd` toolset.
 Two things are settled here rather than in each tool.
 
 **Where files live.** Everything happens under `/app/data`, which
-docker-compose bind-mounts from `./data` read-write. A PDF dropped into
-`data/pdf/` on the host is visible to the container immediately, and the
-Markdown written back to `data/md/` is visible on the host -- no upload
-endpoint, no volume of its own. Names are resolved against that root and
-checked to still be inside it, so a caller cannot walk out of the mount with
-`../../etc/passwd`; the model composes these arguments, so the check is not
+docker-compose bind-mounts from `./data` read-write, and within it under the
+calling user's own folder, `users/<slug>/pdf/` and `users/<slug>/md/` -- the
+same folder `/v1/chat` and `/v1/files` store that user's uploads in (see
+`current_user`). Names are resolved against that root and checked to still be
+inside it, so a caller cannot walk out of it with `../../etc/passwd` or into
+another user's folder; the model composes these arguments, so the check is not
 theoretical.
 
 **Which backend does the conversion.** Normally the separate PP-StructureV3
@@ -54,8 +54,68 @@ class PdfError(Exception):
     """A failure whose message is meant to be shown to the user as-is."""
 
 
+def _users_home() -> Path:
+    """Where per-user Hermes homes live -- same rule as `agents.user_profiles`."""
+    raw = (os.getenv("HERMES_USERS_HOME") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    hermes_home = (os.getenv("HERMES_HOME") or "").strip()
+    base = Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes"
+    return base.parent / ".hermes-users"
+
+
+def _active_hermes_home() -> Optional[Path]:
+    """The Hermes home of the turn this tool call belongs to, if readable."""
+    try:
+        from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        return Path(str(get_hermes_home()))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def current_user() -> str:
+    """
+    The profile slug of the user this call is running for.
+
+    The API stores each user's uploads under `users/<slug>/`, and runs their
+    turn with Hermes' home overridden to `<HERMES_USERS_HOME>/<slug>`. Reading
+    the slug back from that override is how a tool -- which Hermes calls with
+    no user argument -- finds the right folder.
+
+    Fails closed. If the home is not a per-user one (the override did not
+    reach this thread, or the call came from outside a turn), the answer is
+    an error, never the shared folder: guessing here is exactly how one
+    user's release would be read in another user's conversation.
+    """
+    home = _active_hermes_home()
+    base = _users_home()
+    if home is not None:
+        try:
+            parts = home.resolve().relative_to(base.resolve()).parts
+        except (ValueError, OSError):
+            parts = ()
+        if len(parts) == 1 and parts[0] not in {"", ".", ".."}:
+            return parts[0]
+    logger.error(
+        "pdfmd: no per-user Hermes home active (home=%s base=%s)", home, base
+    )
+    raise PdfError(
+        "foydalanuvchi profili aniqlanmadi -- fayllarga kirish to'xtatildi. "
+        "Bu ichki xato; administratorga xabar bering."
+    )
+
+
 def data_root() -> Path:
-    return Path(os.getenv("PDF_DATA_DIR") or "/app/data").resolve()
+    """The calling user's own data folder: `<PDF_DATA_DIR>/users/<slug>`."""
+    base = Path(os.getenv("PDF_DATA_DIR") or "/app/data").resolve()
+    users = base / "users"
+    root = (users / current_user()).resolve()
+    if not _inside(root, users) or root == users:
+        raise PdfError("foydalanuvchi papkasi noto'g'ri")
+    return root
 
 
 def pdf_dir() -> Path:

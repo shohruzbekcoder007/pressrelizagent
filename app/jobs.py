@@ -22,8 +22,11 @@ follow from that, and they are the whole point of this module:
     start of a turn and written at the end, so two overlapping turns on one
     session would interleave and lose one of the two. They queue instead.
 
-This file is COPY'd into the image, so editing it needs `docker compose build
-app`, not a restart.
+Every job belongs to the user (profile slug) who started it, and every lookup
+here takes that owner. A `session_id` is chosen by the client, so on its own
+it proves nothing: without the owner, a second user sending the same session
+id and message would attach to the first user's turn and read its answer, and
+`/v1/jobs` would hand anyone's result to anyone holding the id.
 """
 
 from __future__ import annotations
@@ -45,12 +48,14 @@ _MAX_JOBS = int(os.getenv("JOB_MAX") or 500)
 
 _lock = threading.RLock()
 _jobs: dict[str, "Job"] = {}
-# One lock per session id, created on demand. Held for the whole turn.
+# One lock per (owner, session id), created on demand. Held for the whole turn.
 _session_locks: dict[str, threading.Lock] = {}
 
 
-def _fingerprint(session_id: Optional[str], message: str, reset: bool) -> str:
-    raw = f"{session_id or ''}\x00{message}\x00{int(bool(reset))}"
+def _fingerprint(
+    owner: str, session_id: Optional[str], message: str, reset: bool
+) -> str:
+    raw = f"{owner}\x00{session_id or ''}\x00{message}\x00{int(bool(reset))}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -59,6 +64,7 @@ class Job:
 
     __slots__ = (
         "id",
+        "owner",
         "session_id",
         "fingerprint",
         "status",
@@ -73,12 +79,16 @@ class Job:
 
     def __init__(
         self,
+        owner: str,
         session_id: Optional[str],
         fingerprint: str,
         preview: str,
         files: Optional[list[str]],
     ) -> None:
-        self.id = uuid.uuid4().hex[:16]
+        # 128 bits: the id is what `/v1/jobs/{id}` is fetched by, so it must
+        # not be guessable even though the owner is checked as well.
+        self.id = uuid.uuid4().hex
+        self.owner = owner
         self.session_id = session_id
         self.fingerprint = fingerprint
         self.status = "queued"  # queued | running | done
@@ -138,34 +148,49 @@ def _evict_locked() -> None:
 
 
 def find_running(
-    session_id: Optional[str], message: str, reset: bool
+    owner: str, session_id: Optional[str], message: str, reset: bool
 ) -> Optional[Job]:
-    """A still-running job for this exact request, if one exists."""
+    """A still-running job of `owner` for this exact request, if one exists."""
     if not session_id:
         # Without a session id two identical messages are not knowably the
-        # same request -- they could be two people asking the same thing.
+        # same request -- they could be two tabs asking the same thing.
         return None
-    fp = _fingerprint(session_id, message, reset)
+    fp = _fingerprint(owner, session_id, message, reset)
     with _lock:
         for job in _jobs.values():
-            if job.fingerprint == fp and job.status != "done":
+            if job.owner == owner and job.fingerprint == fp and job.status != "done":
                 return job
     return None
 
 
-def get(job_id: str) -> Optional[Job]:
+def get(job_id: str, owner: str) -> Optional[Job]:
+    """The job, or None if it does not exist *or belongs to someone else*.
+
+    The two cases are deliberately indistinguishable to the caller, so a job
+    id cannot be probed for existence across users.
+    """
     with _lock:
-        return _jobs.get(job_id)
+        job = _jobs.get(job_id)
+    if job is None or job.owner != owner:
+        return None
+    return job
 
 
-def latest_for_session(session_id: str) -> Optional[Job]:
+def latest_for_session(owner: str, session_id: str) -> Optional[Job]:
     with _lock:
-        matches = [j for j in _jobs.values() if j.session_id == session_id]
+        matches = [
+            j
+            for j in _jobs.values()
+            if j.owner == owner and j.session_id == session_id
+        ]
     return max(matches, key=lambda j: j.created_at) if matches else None
 
 
-def _session_lock(session_id: Optional[str]) -> threading.Lock:
-    key = session_id or "\x00anonymous"
+def _session_lock(owner: str, session_id: Optional[str]) -> threading.Lock:
+    # Sessionless turns start from empty history, so strictly they need no
+    # lock; they share one per owner so that one user's burst queues behind
+    # itself instead of occupying the model in parallel.
+    key = f"{owner}\x00{session_id or chr(0) + 'anonymous'}"
     with _lock:
         lock = _session_locks.get(key)
         if lock is None:
@@ -177,6 +202,7 @@ def _session_lock(session_id: Optional[str]) -> threading.Lock:
 def start(
     run: Callable[[], dict[str, Any]],
     *,
+    owner: str,
     session_id: Optional[str],
     message: str,
     reset: bool,
@@ -184,8 +210,9 @@ def start(
 ) -> Job:
     """Run `run()` on its own thread and return the job tracking it."""
     job = Job(
+        owner=owner,
         session_id=session_id,
-        fingerprint=_fingerprint(session_id, message, reset),
+        fingerprint=_fingerprint(owner, session_id, message, reset),
         preview=message[:120],
         files=files,
     )
@@ -196,7 +223,7 @@ def start(
     def _worker() -> None:
         # Serialised per session: the turn reads history at its start and
         # writes it at its end, so overlapping turns would lose one of them.
-        with _session_lock(session_id):
+        with _session_lock(owner, session_id):
             job.status = "running"
             job.started_at = time.time()
             try:
@@ -217,9 +244,10 @@ def start(
                 job.status = "done"
                 job._done.set()
                 logger.info(
-                    "job %s finished in %.1fs (session=%s)",
+                    "job %s finished in %.1fs (user=%s session=%s)",
                     job.id,
                     job.elapsed,
+                    owner,
                     session_id,
                 )
 

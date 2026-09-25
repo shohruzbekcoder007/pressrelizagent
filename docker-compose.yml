@@ -42,6 +42,10 @@ services:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       HERMES_TASK_ROUTING: ${HERMES_TASK_ROUTING:-true}
       HERMES_HOME: /home/appuser/.hermes
+      # One full Hermes home per user (memory, skills, sessions), chosen per
+      # request from the gateway's X-User-Id header. Its own volume below.
+      HERMES_USERS_HOME: /home/appuser/.hermes-users
+      HERMES_REQUIRE_USER_ID: ${HERMES_REQUIRE_USER_ID:-true}
       HERMES_ENABLE_PROJECT_PLUGINS: "true"
       PYTHONPATH: /opt/hermes-agent
       # Left empty on purpose: the host derives it from LLM_PROVIDER.
@@ -52,7 +56,18 @@ services:
       HERMES_SESSION_HISTORY_LIMIT: ${HERMES_SESSION_HISTORY_LIMIT:-6}
       HERMES_SKIP_MEMORY: ${HERMES_SKIP_MEMORY:-false}
       HERMES_REASONING_ENABLED: ${HERMES_REASONING_ENABLED:-false}
-      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # Empty (the default) = no cross-origin browser access; the gateway is a
+      # server-side caller and needs none. `*` is refused.
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # Shared secret the gateway sends as `Authorization: Bearer ...` (its
+      # HERMES_GIS_API_KEY). The service refuses to start without it unless
+      # ALLOW_UNAUTHENTICATED=true.
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:-}
+      API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
+      ALLOW_UNAUTHENTICATED: ${ALLOW_UNAUTHENTICATED:-false}
+      MAX_MESSAGE_CHARS: ${MAX_MESSAGE_CHARS:-8000}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-30}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-10}
       HEALTHCHECK_URL: http://127.0.0.1:8080/health
       # PDF -> Markdown converter (a separate app on the host). Same
       # host.docker.internal rule as the LLM above: 127.0.0.1 inside this
@@ -91,7 +106,11 @@ services:
       # Not 7000: Windows/WinNAT reserves 6945-7044 on this host, and a port
       # inside a reserved range fails to bind with "socket access forbidden".
       # Check with: netsh interface ipv4 show excludedportrange protocol=tcp
-      - "${HOST_PORT:-7100}:8080"
+      # BIND_ADDRESS=127.0.0.1 keeps it off the LAN. Left at 0.0.0.0 by
+      # default because the Open WebUI gateway reaches this port through
+      # host.docker.internal from another compose project -- confirm that
+      # still works before narrowing it.
+      - "${BIND_ADDRESS:-0.0.0.0}:${HOST_PORT:-7100}:8080"
 
     # Reach an Ollama / vLLM / LM Studio server running on the host machine.
     # Docker Desktop provides this name already; Linux needs it spelled out.
@@ -102,6 +121,7 @@ services:
       # Hermes writes memory, skills, session history and cache under
       # HERMES_HOME. A named volume keeps them across redeploys.
       - hermes_home:/home/appuser/.hermes:rw
+      - hermes_users:/home/appuser/.hermes-users:rw
       - ./logs:/app/logs:rw
       - ./data:/app/data:rw
       - ./config:/app/config:ro
@@ -202,6 +222,8 @@ services:
 volumes:
   hermes_home:
     name: pressrelizagent-hermes-home
+  hermes_users:
+    name: pressrelizagent-hermes-users
   neo4j_data:
     name: pressrelizagent-neo4j-data
   neo4j_logs:

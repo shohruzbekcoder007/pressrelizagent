@@ -54,7 +54,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
     APP_HOME=/app \
-    HERMES_HOME=/home/appuser/.hermes \
+    HERMES_HOME=/home/appuser/.hermes     HERMES_USERS_HOME=/home/appuser/.hermes-users \
     HERMES_ENABLE_PROJECT_PLUGINS=true \
     PYTHONPATH=/opt/hermes-agent \
 \
@@ -93,7 +93,7 @@ COPY --chown=appuser:appuser requirements.txt pyproject.toml README.md ./
 RUN sed -i 's/\r$//' /app/scripts/*.sh \
     && chmod +x /app/scripts/*.sh \
     && mkdir -p /app/logs /app/data \
-        /home/appuser/.hermes/plugins /home/appuser/.hermes/logs \
+        /home/appuser/.hermes/plugins /home/appuser/.hermes/logs         /home/appuser/.hermes-users \
     && if [ -f /app/config/hermes_config.yaml ]; then cp /app/config/hermes_config.yaml /home/appuser/.hermes/config.yaml; fi \
     && chown -R appuser:appuser /app/logs /app/data /home/appuser
 

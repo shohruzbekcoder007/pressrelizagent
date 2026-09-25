@@ -32,9 +32,38 @@ from pydantic import BaseModel, Field, ValidationError
 # rejects every real upload.
 from starlette.datastructures import UploadFile
 
+from agents.user_profiles import InvalidUserId, UserProfile, resolve_profile
 from app import __version__, jobs
+from app.rate_limit import RateLimiter
 
 logger = logging.getLogger("app")
+
+# Header carrying the end user's identity, set by the gateway *after* it has
+# authenticated them. It is trusted only because the gateway bearer token is
+# required on the same request -- see `_check_bearer`. Never accept it from an
+# unauthenticated caller.
+USER_ID_HEADER = "X-User-Id"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _max_message_chars() -> int:
+    return max(1, _env_int("MAX_MESSAGE_CHARS", 8000))
 
 # How long a plain JSON `/v1/chat` holds the connection before handing back a
 # job id instead. 0 keeps the old behaviour of waiting for as long as it
@@ -61,17 +90,25 @@ def _heartbeat_seconds() -> float:
         value = _DEFAULT_HEARTBEAT
     return max(1.0, value)
 
-# Uploads land in the same folder the `pdfmd` tools read, which is bind-mounted
-# from ./data. Nothing is imported from the plugin to get here: Hermes loads
-# plugins under a generated module name, so `plugins.pdfmd` is not importable
-# from the app at all. The two copies of this path are kept in step by the one
-# env var below.
+# Uploads land in the folder the `pdfmd` tools read, which is bind-mounted from
+# ./data -- one subfolder per user, `users/<slug>/`, so nobody can list, open
+# or overwrite another user's release. Nothing is imported from the plugin to
+# get here: Hermes loads plugins under a generated module name, so
+# `plugins.pdfmd` is not importable from the app at all. The two copies of
+# this layout are kept in step by `PDF_DATA_DIR` and the profile slug, which
+# the plugin reads back from the Hermes home override.
 _MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
-def _data_root() -> Path:
-    return Path(os.getenv("PDF_DATA_DIR") or "/app/data").resolve()
+def _data_root(profile: UserProfile) -> Path:
+    base = Path(os.getenv("PDF_DATA_DIR") or "/app/data").resolve()
+    # The slug is already validated as a single safe path segment
+    # (`agents.user_profiles`); the containment check is the second layer.
+    root = (base / "users" / profile.slug).resolve()
+    if not root.is_relative_to(base / "users"):
+        raise HTTPException(status_code=400, detail="invalid user")
+    return root
 
 
 def _safe_pdf_name(raw: str) -> str:
@@ -89,12 +126,13 @@ def _safe_pdf_name(raw: str) -> str:
     return base
 
 
-def _store_pdf(raw_name: str, data: bytes) -> str:
+def _store_pdf(profile: UserProfile, raw_name: str, data: bytes) -> str:
     """
     Validate an uploaded PDF and put it where the `pdfmd` tools read.
 
     Shared by `/v1/files` and the multipart form of `/v1/chat`, so a file
-    arriving either way lands under the same rules.
+    arriving either way lands under the same rules -- in the caller's own
+    folder.
     """
     if not data:
         raise HTTPException(status_code=400, detail="fayl bo'sh")
@@ -114,7 +152,7 @@ def _store_pdf(raw_name: str, data: bytes) -> str:
         )
 
     name = _safe_pdf_name(raw_name)
-    root = _data_root()
+    root = _data_root(profile)
     try:
         (root / "pdf").mkdir(parents=True, exist_ok=True)
         (root / "pdf" / name).write_bytes(data)
@@ -131,7 +169,7 @@ def _store_pdf(raw_name: str, data: bytes) -> str:
             status_code=500, detail=f"faylni saqlab bo'lmadi: {exc}"
         ) from exc
 
-    logger.info("stored upload=%s bytes=%d", name, len(data))
+    logger.info("stored upload=%s user=%s bytes=%d", name, profile.slug, len(data))
     return name
 
 
@@ -165,7 +203,12 @@ def _form_bool(raw: Any) -> bool:
 class ChatRequest(BaseModel):
     """Hermes-compatible chat body (gateway Open WebUI platform)."""
 
-    message: str = Field(..., min_length=1, description="User question")
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=_max_message_chars(),
+        description="User question",
+    )
     session_id: Optional[str] = Field(
         default=None,
         description="Multi-turn session id (Hermes host memory)",
@@ -309,7 +352,9 @@ def _mention(message: str, files: list[str]) -> str:
     )
 
 
-async def _read_chat(request: Request) -> tuple[ChatRequest, list[str]]:
+async def _read_chat(
+    request: Request, caller: UserProfile
+) -> tuple[ChatRequest, list[str]]:
     """
     Read a chat request in either wire shape, storing any attached PDFs.
 
@@ -334,7 +379,7 @@ async def _read_chat(request: Request) -> tuple[ChatRequest, list[str]]:
 
     form = await request.form()
     stored = [
-        _store_pdf(item.filename or "", await item.read())
+        _store_pdf(caller, item.filename or "", await item.read())
         for item in _form_files(form)
     ]
     # `message` is the field this API documents; the other two are what chat
@@ -357,17 +402,66 @@ async def _read_chat(request: Request) -> tuple[ChatRequest, list[str]]:
 
 
 def _cors_origins() -> list[str]:
-    raw = os.getenv("CORS_ORIGINS", "*").strip()
-    if raw == "*":
-        return ["*"]
+    """Allowed browser origins.
+
+    `*` together with `allow_credentials=True` is the combination browsers
+    refuse anyway, so it is not offered: an unset or wildcard value means no
+    cross-origin access at all. The gateway is a server-side caller and needs
+    none.
+    """
+    raw = os.getenv("CORS_ORIGINS", "").strip()
+    if not raw or raw == "*":
+        if raw == "*":
+            logger.warning(
+                "CORS_ORIGINS=* is refused with credentialed requests; "
+                "cross-origin access disabled. List exact origins to enable it."
+            )
+        return []
     return [o.strip() for o in raw.split(",") if o.strip()]
+
+
+def _gateway_token() -> str:
+    """The shared secret the gateway must present.
+
+    `GATEWAY_TOKEN` is the current name; `API_BEARER_TOKEN` stays accepted so
+    an existing deployment keeps working.
+    """
+    return (
+        os.getenv("GATEWAY_TOKEN", "").strip()
+        or os.getenv("API_BEARER_TOKEN", "").strip()
+    )
+
+
+def _require_auth_configured() -> None:
+    """Refuse to serve without a gateway token.
+
+    Previously an unset token disabled authentication entirely, which meant a
+    forgotten setting silently published /v1/chat -- and with it, since the
+    user id header is only as trustworthy as the caller, every user's memory.
+    Failing at startup is the safer direction for that mistake to fall.
+    `ALLOW_UNAUTHENTICATED=true` is the explicit opt-out for local development.
+    """
+    if _gateway_token():
+        return
+    if _env_bool("ALLOW_UNAUTHENTICATED", False):
+        logger.warning(
+            "ALLOW_UNAUTHENTICATED=true and no GATEWAY_TOKEN set -- /v1/chat is "
+            "open. Never do this on a reachable network."
+        )
+        return
+    raise RuntimeError(
+        "GATEWAY_TOKEN is not set. Set it to the shared secret the gateway "
+        "sends, or set ALLOW_UNAUTHENTICATED=true for local development only."
+    )
 
 
 def _check_bearer(
     authorization: Optional[str] = Header(default=None),
 ) -> None:
-    expected = os.getenv("API_BEARER_TOKEN", "").strip()
+    expected = _gateway_token()
     if not expected:
+        # Only reachable with ALLOW_UNAUTHENTICATED=true; startup refuses
+        # otherwise.
         return
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(
@@ -384,7 +478,71 @@ def _check_bearer(
         )
 
 
+def _resolve_caller(
+    _auth: None = Depends(_check_bearer),
+    x_user_id: Optional[str] = Header(default=None),
+) -> UserProfile:
+    """Map the gateway's `X-User-Id` header to the caller's own Hermes profile.
+
+    Depends on `_check_bearer`, so the header is never read from a caller that
+    has not proved it is the gateway. Requiring the header by default is
+    deliberate: a missing identity used to mean everyone shared one memory,
+    one session store and one upload folder, which is the leak this closes.
+    `HERMES_REQUIRE_USER_ID=false` restores a single shared profile for a
+    genuinely single-user deployment.
+    """
+    if x_user_id is None or not x_user_id.strip():
+        if _env_bool("HERMES_REQUIRE_USER_ID", True):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"{USER_ID_HEADER} header is required. The gateway must "
+                    "send the authenticated end user's id, or set "
+                    "HERMES_REQUIRE_USER_ID=false to share one profile."
+                ),
+            )
+        return resolve_profile(None)
+
+    try:
+        return resolve_profile(x_user_id)
+    except InvalidUserId as exc:
+        # Logged at warning because the rejected values worth seeing here are
+        # traversal attempts, not typos.
+        logger.warning("rejected %s=%r: %s", USER_ID_HEADER, x_user_id[:120], exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {USER_ID_HEADER}: {exc}",
+        ) from exc
+
+
+_limiter = RateLimiter(
+    rate_per_minute=float(_env_int("RATE_LIMIT_PER_MINUTE", 30)),
+    burst=_env_int("RATE_LIMIT_BURST", 10),
+)
+
+
+def _check_rate_limit(profile: UserProfile, request: Request) -> None:
+    """One bucket per user, falling back to the peer address for the shared
+    profile so it cannot be drained by a single client on everyone's behalf."""
+    if not _limiter.enabled:
+        return
+    key = profile.slug
+    if profile.is_shared:
+        client = request.client.host if request.client else "unknown"
+        key = f"{profile.slug}:{client}"
+    allowed, retry_after = _limiter.check(key)
+    if not allowed:
+        logger.warning("rate limit hit for %s (retry in %ss)", key, retry_after)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Juda ko'p so'rov. Birozdan keyin qayta urinib ko'ring.",
+            headers={"Retry-After": str(max(1, int(retry_after)))},
+        )
+
+
 def create_app() -> FastAPI:
+    _require_auth_configured()
+
     app = FastAPI(
         title=os.getenv("APP_NAME", "PressRelizAgent"),
         version=__version__,
@@ -421,6 +579,12 @@ def create_app() -> FastAPI:
 
     @app.get("/ready")
     def ready() -> dict[str, Any]:
+        """Readiness probe. Unauthenticated, so the body stays minimal.
+
+        The status code carries the signal an orchestrator needs; the full
+        diagnostic view (including the upstream address and the last error)
+        is on the authenticated /v1/info, and the detail is logged here.
+        """
         from agents.hermes_host import get_hermes_host
 
         host = get_hermes_host()
@@ -428,14 +592,12 @@ def create_app() -> FastAPI:
             host.initialize()
         rd = host.readiness()
         if not rd.get("ready"):
-            raise HTTPException(
-                status_code=503,
-                detail={"status": "not_ready", "host": rd},
-            )
-        return {"status": "ready", "host": rd}
+            logger.warning("readiness probe failed: %s", rd)
+            raise HTTPException(status_code=503, detail={"status": "not_ready"})
+        return {"status": "ready", "backend": rd.get("backend")}
 
     @app.get("/v1/info")
-    def info() -> dict[str, Any]:
+    def info(_: None = Depends(_check_bearer)) -> dict[str, Any]:
         from agents.hermes_host import get_hermes_host
 
         host = get_hermes_host()
@@ -454,13 +616,15 @@ def create_app() -> FastAPI:
             "provider": rd.get("provider"),
             "model": rd.get("model"),
             "task_model": rd.get("task_model"),
-            "base_url": rd.get("base_url"),
+            "error": rd.get("error"),
+            # `base_url` is deliberately omitted: it is the internal vLLM /
+            # Ollama address and nothing downstream needs it.
         }
 
     @app.post("/v1/files")
     async def upload_file(
         request: Request,
-        _: None = Depends(_check_bearer),
+        caller: UserProfile = Depends(_resolve_caller),
     ) -> dict[str, Any]:
         """
         Store a PDF without asking anything about it.
@@ -475,6 +639,7 @@ def create_app() -> FastAPI:
         `multipart/form-data` upload under the field `file`, or the raw bytes
         as the body with `?name=`.
         """
+        _check_rate_limit(caller, request)
         content_type = (request.headers.get("content-type") or "").lower()
         if content_type.startswith("multipart/form-data"):
             item = _form_file(await request.form())
@@ -483,10 +648,12 @@ def create_app() -> FastAPI:
                     status_code=400,
                     detail="multipart body has no file part (field `file`)",
                 )
-            name = _store_pdf(item.filename or "", await item.read())
+            name = _store_pdf(caller, item.filename or "", await item.read())
         else:
             name = _store_pdf(
-                request.query_params.get("name") or "", await request.body()
+                caller,
+                request.query_params.get("name") or "",
+                await request.body(),
             )
 
         return {
@@ -500,9 +667,11 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/v1/files")
-    def list_files(_: None = Depends(_check_bearer)) -> dict[str, Any]:
-        """What is already uploaded, and what has already been converted."""
-        root = _data_root()
+    def list_files(
+        caller: UserProfile = Depends(_resolve_caller),
+    ) -> dict[str, Any]:
+        """What the caller has uploaded, and what has already been converted."""
+        root = _data_root(caller)
 
         def names(folder: str, suffix: str) -> list[str]:
             try:
@@ -519,7 +688,7 @@ def create_app() -> FastAPI:
     @app.post("/v1/chat", response_model=ChatResponse)
     async def chat(
         request: Request,
-        _: None = Depends(_check_bearer),
+        caller: UserProfile = Depends(_resolve_caller),
     ) -> Any:
         """
         Gateway entry: Hermes host keeps context and calls its tools.
@@ -551,28 +720,36 @@ def create_app() -> FastAPI:
 
         In every case a dropped connection leaves the turn running and its
         answer collectable from `GET /v1/jobs/{job_id}`.
+
+        Runs against `caller`'s own Hermes profile, so memory, session
+        history, `session_search`, uploads and jobs see only that user's data.
         """
         from agents.hermes_host import get_hermes_host
 
-        body, stored = await _read_chat(request)
+        # Before reading the body: a rejected request must not get as far as
+        # writing its attachments to disk.
+        _check_rate_limit(caller, request)
+        body, stored = await _read_chat(request, caller)
         wants_stream = bool(body.stream) or "text/event-stream" in (
             request.headers.get("accept") or ""
         )
 
         existing = jobs.find_running(
-            body.session_id, body.message, body.reset_session
+            caller.slug, body.session_id, body.message, body.reset_session
         )
         if existing is not None:
             logger.info(
-                "POST /v1/chat attaching to running job %s (session=%r)",
+                "POST /v1/chat attaching to running job %s (user=%s session=%r)",
                 existing.id,
+                caller.slug,
                 body.session_id,
             )
             job = existing
         else:
             logger.info(
-                "POST /v1/chat session_id=%r reset=%s files=%s stream=%s "
-                "msg_len=%d msg_preview=%r",
+                "POST /v1/chat user=%s session_id=%r reset=%s files=%s "
+                "stream=%s msg_len=%d msg_preview=%r",
+                caller.slug,
                 body.session_id,
                 body.reset_session,
                 stored or "-",
@@ -586,7 +763,9 @@ def create_app() -> FastAPI:
                     body.message,
                     session_id=body.session_id,
                     reset_session=body.reset_session,
+                    profile=caller,
                 ),
+                owner=caller.slug,
                 session_id=body.session_id,
                 message=body.message,
                 reset=body.reset_session,
@@ -627,15 +806,16 @@ def create_app() -> FastAPI:
     @app.get("/v1/jobs/{job_id}", response_model=ChatResponse)
     def job_status(
         job_id: str,
-        _: None = Depends(_check_bearer),
+        caller: UserProfile = Depends(_resolve_caller),
     ) -> Any:
         """
         Collect a turn started earlier, whatever happened to its connection.
 
         Still running: `status: "running"` with the seconds so far. Finished:
-        the full answer, exactly as `/v1/chat` would have returned it.
+        the full answer, exactly as `/v1/chat` would have returned it. Another
+        user's job id answers 404, the same as an id that never existed.
         """
-        job = jobs.get(job_id)
+        job = jobs.get(job_id, caller.slug)
         if job is None:
             raise HTTPException(
                 status_code=404,
@@ -656,13 +836,14 @@ def create_app() -> FastAPI:
     @app.get("/v1/jobs")
     def job_list(
         session_id: Optional[str] = None,
-        _: None = Depends(_check_bearer),
+        caller: UserProfile = Depends(_resolve_caller),
     ) -> dict[str, Any]:
-        """The most recent turn for a session -- how a reconnecting client
-        finds the job it lost the connection to without holding its id."""
+        """The caller's most recent turn for a session -- how a reconnecting
+        client finds the job it lost the connection to without holding its
+        id."""
         if not session_id:
             raise HTTPException(status_code=400, detail="session_id kerak")
-        job = jobs.latest_for_session(session_id)
+        job = jobs.latest_for_session(caller.slug, session_id)
         if job is None:
             return {"success": True, "job": None}
         return {"success": True, "job": job.snapshot()}
